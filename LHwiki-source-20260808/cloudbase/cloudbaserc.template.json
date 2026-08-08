@@ -1,0 +1,18 @@
+{
+  "envId": "请替换为上海环境ID",
+  "functionRoot": "./functions",
+  "functions": [
+    {
+      "name": "lhwiki-api",
+      "dir": "./functions/lhwiki-api",
+      "type": "HTTP",
+      "runtime": "Nodejs20.19",
+      "timeout": 15,
+      "memorySize": 256,
+      "installDependency": false,
+      "ignore": [
+        "*.log"
+      ]
+    }
+  ]
+}
