@@ -6,7 +6,10 @@ const PRIMARY_KEYS = Object.freeze({
   users: 'student_id',
   submissions: 'id',
   review_events: 'id',
-  contributors: 'student_id'
+  contributors: 'student_id',
+  drafts: 'id',
+  teacher_submissions: 'id',
+  teacher_additions: 'id'
 });
 
 function primaryKey(table) {
@@ -23,7 +26,7 @@ function assertResult(result, operation) {
   return result?.data;
 }
 
-function createPgStore({ envId, apiKey, fetchImpl = globalThis.fetch }) {
+function createPgStore({ envId, apiKey, fetchImpl = globalThis.fetch, requestTimeoutMs = 8000 }) {
   if (!envId || !apiKey || typeof fetchImpl !== 'function') {
     throw new Error('CloudBase PostgreSQL HTTP configuration is unavailable');
   }
@@ -34,16 +37,45 @@ function createPgStore({ envId, apiKey, fetchImpl = globalThis.fetch }) {
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
-    const response = await fetchImpl(url, {
-      method,
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-        ...(prefer ? { prefer } : {})
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
-    });
+    const maxAttempts = method === 'GET' ? 2 : 1;
+    let response;
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+      try {
+        response = await fetchImpl(url, {
+          method,
+          headers: {
+            accept: 'application/json',
+            authorization: `Bearer ${apiKey}`,
+            'content-type': 'application/json',
+            ...(prefer ? { prefer } : {})
+          },
+          signal: controller.signal,
+          ...(body === undefined ? {} : { body: JSON.stringify(body) })
+        });
+        if (attempt < maxAttempts && [429, 502, 503, 504].includes(response.status)) {
+          await response.text().catch(() => '');
+          await new Promise(resolve => setTimeout(resolve, 150 * attempt));
+          continue;
+        }
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts) break;
+        await new Promise(resolve => setTimeout(resolve, 150 * attempt));
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    if (!response) {
+      const failure = new Error('CloudBase PostgreSQL HTTP request failed');
+      failure.name = 'CloudBasePgError';
+      failure.code = lastError?.name === 'AbortError' ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_UNAVAILABLE';
+      failure.cause = lastError;
+      throw failure;
+    }
     const raw = await response.text();
     let data = null;
     if (raw) {
@@ -84,17 +116,52 @@ function createPgStore({ envId, apiKey, fetchImpl = globalThis.fetch }) {
     assertResult(result, `Delete ${table}`);
   }
 
+  function encodeFilters(where = null) {
+    return Object.fromEntries(Object.entries(where || {}).map(([key, value]) => {
+      if (value && typeof value === 'object' && typeof value.operator === 'string') {
+        return [key, `${value.operator}.${value.value}`];
+      }
+      return [key, `eq.${value}`];
+    }));
+  }
+
+  async function createDocument(table, data) {
+    const result = await request(table, {
+      method: 'POST',
+      body: data,
+      prefer: 'return=representation'
+    });
+    return assertResult(result, `Create ${table}`)?.[0] || null;
+  }
+
+  async function updateDocuments(table, where, data) {
+    const result = await request(table, {
+      method: 'PATCH',
+      query: encodeFilters(where),
+      body: data,
+      prefer: 'return=representation'
+    });
+    return assertResult(result, `Update ${table}`) || [];
+  }
+
+  async function deleteDocuments(table, where) {
+    const result = await request(table, {
+      method: 'DELETE',
+      query: encodeFilters(where),
+      prefer: 'return=representation'
+    });
+    return assertResult(result, `Delete ${table}`) || [];
+  }
+
   async function queryDocuments(table, where = null, limit = 100) {
-    const filters = Object.fromEntries(
-      Object.entries(where || {}).map(([key, value]) => [key, `eq.${value}`])
-    );
+    const filters = encodeFilters(where);
     const result = await request(table, {
       query: { select: '*', ...filters, limit }
     });
     return assertResult(result, `Query ${table}`) || [];
   }
 
-  return { getDocument, setDocument, deleteDocument, queryDocuments };
+  return { createDocument, deleteDocument, deleteDocuments, getDocument, queryDocuments, setDocument, updateDocuments };
 }
 
 module.exports = { PRIMARY_KEYS, createPgStore };

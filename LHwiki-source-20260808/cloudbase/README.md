@@ -4,7 +4,7 @@
 
 - `public/`：CloudBase 静态网站托管；
 - `functions/lhwiki-api/`：Node.js 20 HTTP 云函数；
-- CloudBase PostgreSQL：`users`、`sections`、`articles`、`submissions`、`review_events`、`contributors` 六张表；
+- CloudBase PostgreSQL：`users`、`sections`、`articles`、`submissions`、`review_events`、`contributors`、`drafts` 七张表；
 - 备案自定义域名：同域名下 `/api/*` 进入云函数，其余路径进入静态托管。
 
 ## 最短部署流程
@@ -16,6 +16,8 @@
 5. 按 `备案与域名接入.md` 提交备案、绑定证书、CNAME 和同域路由。
 
 数据库结构由 `cloudbase/migrations/` 中的 PostgreSQL 迁移管理。HTTP 函数通过 CloudBase 关系型数据库 REST API 访问数据；服务器 API Key 只存在于函数环境变量，前端代码中没有密钥。基础内容来自 `seed-data.json`，首次访问 API 时自动写入空表。
+
+`drafts` 仅允许 `lhwiki-api` 的 `service_role` 访问，浏览器不能直接读写。应用层签名会话先校验学号身份，再按 `student_id` 限定草稿；保存使用单调递增的 `revision` 做条件更新，冲突返回 409，避免多个页面互相覆盖。
 
 ## 当前线上环境
 
