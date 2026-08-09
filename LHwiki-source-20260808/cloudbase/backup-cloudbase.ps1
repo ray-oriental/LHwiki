@@ -31,7 +31,7 @@ $network = @{ TimeoutSec = 30 }
 if (Test-NetConnection -ComputerName '127.0.0.1' -Port 7897 -InformationLevel Quiet -WarningAction SilentlyContinue) {
   $network.Proxy = 'http://127.0.0.1:7897'
 }
-$tables = @('sections', 'articles', 'users', 'submissions', 'review_events', 'contributors')
+$tables = @('sections', 'articles', 'users', 'submissions', 'review_events', 'contributors', 'drafts', 'teacher_submissions', 'teacher_additions')
 $data = [ordered]@{}
 
 foreach ($table in $tables) {
@@ -64,7 +64,13 @@ foreach ($table in $tables) { $payload.counts[$table] = @($data[$table]).Count }
 $payload | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $tempPath -Encoding UTF8
 
 $verified = Get-Content -Raw -LiteralPath $tempPath -Encoding UTF8 | ConvertFrom-Json
-if ($verified.environmentId -ne $envId -or $null -eq $verified.data.articles) {
+if (
+  $verified.environmentId -ne $envId -or
+  $null -eq $verified.data.articles -or
+  $null -eq $verified.data.drafts -or
+  $null -eq $verified.data.teacher_submissions -or
+  $null -eq $verified.data.teacher_additions
+) {
   Remove-Item -LiteralPath $tempPath -Force
   throw '备份完整性校验失败，临时文件已删除。'
 }

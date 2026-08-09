@@ -7,8 +7,10 @@ const { createPgStore } = require('./pg-store.cjs');
 const {
   ADMIN_LOGIN_ID,
   CONTENT_TYPES,
+  KNOWN_TEACHER_NAMES,
   normalizeText,
   parseDocument,
+  parseDraftDocument,
   slugify,
   validLoginId,
   validStudentId
@@ -21,7 +23,15 @@ const seed = JSON.parse(readFileSync(existsSync(migrationPath) ? migrationPath :
 if (!process.env.TCB_ENV || !process.env.CLOUDBASE_APIKEY) {
   throw new Error('Missing TCB_ENV or CLOUDBASE_APIKEY');
 }
-const { getDocument, setDocument, deleteDocument, queryDocuments } = createPgStore({
+const {
+  createDocument,
+  deleteDocument,
+  deleteDocuments,
+  getDocument,
+  queryDocuments,
+  setDocument,
+  updateDocuments
+} = createPgStore({
   envId: process.env.TCB_ENV,
   apiKey: process.env.CLOUDBASE_APIKEY
 });
@@ -178,6 +188,110 @@ function mapArticle(row) {
   return { ...clean, body: parseDocument(clean.body_json), body_json: undefined };
 }
 
+function mapTeacherSubmission(row) {
+  const clean = withoutId(row);
+  return {
+    id: clean.id,
+    name: clean.name,
+    subject: clean.subject,
+    motto: clean.motto,
+    status: clean.status,
+    reviewNote: clean.review_note,
+    createdAt: clean.created_at,
+    updatedAt: clean.updated_at
+  };
+}
+
+function mapTeacherAddition(row) {
+  const clean = withoutId(row);
+  return {
+    id: clean.id,
+    name: clean.name,
+    subject: clean.subject,
+    motto: clean.motto,
+    profile: '',
+    sourceUrl: '',
+    sourceLabel: '经校内补充审核',
+    publishedAt: clean.approved_at
+  };
+}
+
+function mapDraft(row) {
+  const clean = withoutId(row);
+  if (!clean) return null;
+  return {
+    id: clean.id,
+    draftKey: clean.draft_key,
+    targetType: clean.target_type,
+    targetId: clean.target_id,
+    sectionSlug: clean.section_slug,
+    title: clean.title,
+    summary: clean.summary,
+    body: parseDraftDocument(clean.body_json) || [],
+    contentType: clean.content_type,
+    subject: clean.subject,
+    authorLabel: clean.author_label,
+    anonymous: clean.anonymous === 1,
+    revision: Number(clean.revision),
+    createdAt: clean.created_at,
+    updatedAt: clean.updated_at
+  };
+}
+
+function normalizeDraftSnapshot(snapshot) {
+  const body = parseDraftDocument(snapshot?.body ?? []);
+  if (!body) return { error: '草稿正文格式无效' };
+  const bodyJson = JSON.stringify(body);
+  if (Buffer.byteLength(bodyJson, 'utf8') > 220 * 1024) return { error: '草稿正文过长' };
+  return {
+    values: {
+      section_slug: normalizeText(snapshot?.sectionSlug, 60),
+      title: normalizeText(snapshot?.title, 100),
+      summary: normalizeText(snapshot?.summary, 240),
+      body_json: bodyJson,
+      content_type: CONTENT_TYPES.has(snapshot?.contentType) ? snapshot.contentType : '',
+      subject: normalizeText(snapshot?.subject, 80),
+      author_label: normalizeText(snapshot?.authorLabel, 40),
+      anonymous: snapshot?.anonymous ? 1 : 0
+    }
+  };
+}
+
+function draftSubmissionInput(draft) {
+  return {
+    sectionSlug: draft.section_slug,
+    title: draft.title,
+    summary: draft.summary,
+    body: parseDraftDocument(draft.body_json) || [],
+    contentType: draft.content_type,
+    subject: draft.subject,
+    authorLabel: draft.author_label,
+    anonymous: draft.anonymous === 1
+  };
+}
+
+async function validateDraftTarget(user, targetType, targetId, requestedDraftKey = '') {
+  if (targetType === 'new') {
+    if (targetId) return { error: '新投稿草稿不能指定目标' };
+    const draftKey = /^new:[A-Za-z0-9_-]{8,80}$/.test(requestedDraftKey)
+      ? requestedDraftKey
+      : `new:${crypto.randomUUID()}`;
+    return { draftKey, targetId: null };
+  }
+  if (targetType === 'submission') {
+    const submission = withoutId(await getDocument('submissions', targetId));
+    if (!submission || submission.student_id !== user.student_id) return { error: '没有找到这份投稿', status: 404 };
+    if (!['pending', 'changes_requested'].includes(submission.status)) return { error: '当前投稿状态不能修改', status: 409 };
+    return { draftKey: `submission:${targetId}`, targetId };
+  }
+  if (targetType === 'article') {
+    if (user.role !== 'admin') return { error: '需要管理员权限', status: 403 };
+    if (!withoutId(await getDocument('articles', targetId))) return { error: '没有找到这篇已发布内容', status: 404 };
+    return { draftKey: `article:${targetId}`, targetId };
+  }
+  return { error: '草稿目标无效' };
+}
+
 async function requireUser(request, roles = []) {
   const user = await readSession(request);
   if (!user) return { response: error('请先登入', 401) };
@@ -206,6 +320,9 @@ function enforceMutationRate(request, scope, limit, windowMs = 60_000) {
     for (const [bucket, values] of mutationWindows) {
       if (!values.some(value => timestamp - value < windowMs)) mutationWindows.delete(bucket);
     }
+    while (mutationWindows.size > 2500) {
+      mutationWindows.delete(mutationWindows.keys().next().value);
+    }
   }
   return null;
 }
@@ -230,16 +347,23 @@ async function route(request) {
   if (!['GET', 'HEAD'].includes(method) && !checkMutationOrigin(request)) return error('请求来源无效', 403);
 
   if (method === 'GET' && path === '/api/health') {
-    return result({ ok: true, platform: 'cloudbase', region: process.env.TENCENTCLOUD_REGION || 'ap-shanghai' });
+    await queryDocuments('sections', null, 1);
+    return result({
+      ok: true,
+      database: 'ready',
+      platform: 'cloudbase',
+      region: process.env.TENCENTCLOUD_REGION || 'ap-shanghai'
+    });
   }
 
   await ensureSeed();
 
   if (method === 'GET' && path === '/api/bootstrap') {
-    const [sections, articles, contributors] = await Promise.all([
+    const [sections, articles, contributors, teacherAdditions] = await Promise.all([
       queryDocuments('sections'),
       queryDocuments('articles'),
-      queryDocuments('contributors')
+      queryDocuments('contributors'),
+      queryDocuments('teacher_additions')
     ]);
     sections.sort((a, b) => a.sort_order - b.sort_order);
     sortByDate(articles, 'published_at');
@@ -248,7 +372,7 @@ async function route(request) {
       .sort((a, b) => String(a.approved_at).localeCompare(String(b.approved_at)))
       .map(item => ({ displayName: item.display_name, since: item.approved_at }));
     return result(
-      { sections: sections.map(withoutId), articles: articles.map(withoutId), contributors: publicContributors },
+      { sections: sections.map(withoutId), articles: articles.map(withoutId), contributors: publicContributors, teacherAdditions: teacherAdditions.map(mapTeacherAddition) },
       200,
       { 'cache-control': 'public, max-age=60, stale-while-revalidate=300' }
     );
@@ -258,7 +382,7 @@ async function route(request) {
     const slug = decodeURIComponent(path.slice('/api/articles/'.length));
     const article = await getDocument('articles', slug);
     return article
-      ? result({ article: mapArticle(article) }, 200, { 'cache-control': 'public, max-age=300, stale-while-revalidate=600' })
+      ? result({ article: mapArticle(article) })
       : error('没有找到这篇内容', 404);
   }
 
@@ -304,6 +428,138 @@ async function route(request) {
     return result({ user: publicUser(updated) });
   }
 
+  if (method === 'GET' && path === '/api/drafts/mine') {
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const drafts = sortByDate(
+      await queryDocuments('drafts', { student_id: auth.user.student_id }, 100),
+      'updated_at'
+    ).map(mapDraft);
+    return result({ drafts }, 200, { 'cache-control': 'private, no-store' });
+  }
+
+  if (method === 'POST' && path === '/api/drafts') {
+    const limited = enforceMutationRate(request, 'draft-create', 30);
+    if (limited) return limited;
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const data = await readJson(request);
+    const targetType = normalizeText(data?.targetType, 20);
+    const targetId = normalizeText(data?.targetId, 140) || null;
+    const target = await validateDraftTarget(auth.user, targetType, targetId, normalizeText(data?.draftKey, 100));
+    if (target.error) return error(target.error, target.status || 400);
+    const existing = (await queryDocuments('drafts', {
+      student_id: auth.user.student_id,
+      draft_key: target.draftKey
+    }, 1))[0];
+    if (existing) return result({ draft: mapDraft(existing) });
+    const prepared = normalizeDraftSnapshot(data?.snapshot || {});
+    if (prepared.error) return error(prepared.error);
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    let created;
+    try {
+      created = await createDocument('drafts', {
+        id,
+        student_id: auth.user.student_id,
+        draft_key: target.draftKey,
+        target_type: targetType,
+        target_id: target.targetId,
+        ...prepared.values,
+        revision: 1,
+        created_at: timestamp,
+        updated_at: timestamp
+      });
+    } catch (failure) {
+      const raced = (await queryDocuments('drafts', { student_id: auth.user.student_id, draft_key: target.draftKey }, 1))[0];
+      if (!raced) throw failure;
+      created = raced;
+    }
+    return result({ draft: mapDraft(created) }, 201);
+  }
+
+  const draftMatch = path.match(/^\/api\/drafts\/([a-zA-Z0-9_-]+)$/);
+  if (draftMatch && ['PUT', 'DELETE'].includes(method)) {
+    const limited = enforceMutationRate(request, method === 'PUT' ? 'draft-save' : 'draft-delete', method === 'PUT' ? 90 : 30);
+    if (limited) return limited;
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const existing = withoutId(await getDocument('drafts', draftMatch[1]));
+    if (!existing || existing.student_id !== auth.user.student_id) return error('没有找到这份草稿', 404);
+    if (method === 'DELETE') {
+      await deleteDocuments('drafts', { id: existing.id, student_id: auth.user.student_id });
+      return result({ ok: true });
+    }
+    const data = await readJson(request);
+    const expectedRevision = Number(data?.expectedRevision);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1) return error('草稿版本无效');
+    const prepared = normalizeDraftSnapshot(data?.snapshot);
+    if (prepared.error) return error(prepared.error);
+    const timestamp = now();
+    const updated = await updateDocuments('drafts', {
+      id: existing.id,
+      student_id: auth.user.student_id,
+      revision: expectedRevision
+    }, {
+      ...prepared.values,
+      revision: expectedRevision + 1,
+      updated_at: timestamp
+    });
+    if (!updated.length) {
+      const latest = withoutId(await getDocument('drafts', existing.id));
+      return result({ error: '草稿已在其他页面更新', conflict: mapDraft(latest) }, 409);
+    }
+    return result({ draft: mapDraft(updated[0]) });
+  }
+
+  const draftSubmitMatch = path.match(/^\/api\/drafts\/([a-zA-Z0-9_-]+)\/submit$/);
+  if (method === 'POST' && draftSubmitMatch) {
+    const limited = enforceMutationRate(request, 'draft-submit', 20);
+    if (limited) return limited;
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const draft = withoutId(await getDocument('drafts', draftSubmitMatch[1]));
+    if (!draft || draft.student_id !== auth.user.student_id) return error('没有找到这份草稿', 404);
+    const expectedRevision = Number((await readJson(request))?.expectedRevision);
+    if (!Number.isInteger(expectedRevision) || expectedRevision !== Number(draft.revision)) {
+      return result({ error: '提交前草稿已经更新', conflict: mapDraft(draft) }, 409);
+    }
+    const prepared = await validateSubmission(draftSubmissionInput(draft));
+    if (prepared.error) return error(prepared.error);
+    const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
+    const timestamp = now();
+    let id = draft.target_id;
+    let slug = null;
+    if (draft.target_type === 'new') {
+      id = draft.id;
+      const recent = await queryDocuments('submissions', { student_id: auth.user.student_id });
+      const alreadyCreated = withoutId(await getDocument('submissions', id));
+      if (!alreadyCreated && recent.filter(item => Date.now() - Date.parse(item.created_at) < 86400_000).length >= 10) {
+        return error('每天最多提交 10 次，请稍后再试', 429);
+      }
+      if (!alreadyCreated) {
+        await rememberNamedContributor(auth.user.student_id, author_label, timestamp);
+        await setDocument('submissions', id, { id, student_id: auth.user.student_id, section_slug, title, summary, body_json, content_type, subject, author_label, status: 'pending', review_note: '', created_at: timestamp, updated_at: timestamp });
+      }
+    } else if (draft.target_type === 'submission') {
+      const submission = withoutId(await getDocument('submissions', draft.target_id));
+      if (!submission || submission.student_id !== auth.user.student_id) return error('没有找到这份投稿', 404);
+      if (!['pending', 'changes_requested'].includes(submission.status)) return error('当前投稿状态不能修改', 409);
+      await rememberNamedContributor(auth.user.student_id, author_label);
+      await setDocument('submissions', submission.id, { ...submission, section_slug, title, summary, body_json, content_type, subject, author_label, status: 'pending', review_note: '', updated_at: timestamp });
+    } else if (draft.target_type === 'article') {
+      if (auth.user.role !== 'admin') return error('需要管理员权限', 403);
+      const article = withoutId(await getDocument('articles', draft.target_id));
+      if (!article) return error('没有找到这篇已发布内容', 404);
+      slug = article.slug;
+      await setDocument('articles', article.slug, { ...article, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: timestamp });
+    } else {
+      return error('草稿目标无效');
+    }
+    await deleteDocuments('drafts', { id: draft.id, student_id: auth.user.student_id });
+    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending' });
+  }
+
   if (method === 'GET' && path === '/api/submissions/mine') {
     const auth = await requireUser(request);
     if (auth.response) return auth.response;
@@ -312,6 +568,48 @@ async function route(request) {
       const clean = withoutId(row);
       return { ...clean, body: parseDocument(clean.body_json), body_json: undefined };
     }) });
+  }
+
+  if (method === 'GET' && path === '/api/teacher-submissions/mine') {
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const rows = sortByDate(await queryDocuments('teacher_submissions', { student_id: auth.user.student_id }), 'created_at');
+    return result({ teacherSubmissions: rows.map(mapTeacherSubmission) });
+  }
+
+  if (method === 'POST' && path === '/api/teacher-submissions') {
+    const limited = enforceMutationRate(request, 'teacher-submission', 15);
+    if (limited) return limited;
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const data = await readJson(request);
+    const name = normalizeText(data?.name, 30);
+    const subject = normalizeText(data?.subject, 30);
+    const motto = normalizeText(data?.motto, 240);
+    if (name.length < 2) return error('请填写教师姓名');
+    if (!subject) return error('请填写任教学科');
+    if (KNOWN_TEACHER_NAMES.has(name)) return error('教师索引中已经有这位老师', 409);
+    if ((await queryDocuments('teacher_additions', { name }, 1)).length) return error('教师索引中已经有这位老师', 409);
+    if ((await queryDocuments('teacher_submissions', { name, status: 'pending' }, 1)).length) return error('这位老师的补充资料正在审核中', 409);
+    const recent = await queryDocuments('teacher_submissions', { student_id: auth.user.student_id }, 100);
+    if (recent.filter(item => Date.now() - Date.parse(item.created_at) < 86400_000).length >= 5) return error('每天最多提交 5 位教师，请稍后再试', 429);
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    const created = {
+      id,
+      student_id: auth.user.student_id,
+      name,
+      subject,
+      motto,
+      status: 'pending',
+      review_note: '',
+      reviewer_id: null,
+      created_at: timestamp,
+      updated_at: timestamp,
+      reviewed_at: null
+    };
+    await setDocument('teacher_submissions', id, created);
+    return result({ teacherSubmission: mapTeacherSubmission(created) }, 201);
   }
 
   if (method === 'POST' && path === '/api/submissions') {
@@ -354,13 +652,62 @@ async function route(request) {
     const url = new URL(request.url, 'http://localhost');
     const requestedStatus = url.searchParams.get('status');
     const status = ['pending', 'changes_requested', 'approved', 'rejected'].includes(requestedStatus) ? requestedStatus : 'pending';
-    const [rows, sections] = await Promise.all([queryDocuments('submissions', { status }), queryDocuments('sections')]);
+    const [rows, sections, teacherRows] = await Promise.all([
+      queryDocuments('submissions', { status }),
+      queryDocuments('sections'),
+      queryDocuments('teacher_submissions', { status: status === 'changes_requested' ? 'pending' : status })
+    ]);
     const sectionTitles = Object.fromEntries(sections.map(item => [item.slug, item.title]));
     sortByDate(rows, 'created_at', 'asc');
     return result({ submissions: rows.map(row => {
       const clean = withoutId(row);
       return { ...clean, student_id: '匿名校内成员', section_title: sectionTitles[clean.section_slug] || clean.section_slug, body: parseDocument(clean.body_json), body_json: undefined };
-    }) });
+    }), teacherSubmissions: teacherRows.map(row => ({ ...mapTeacherSubmission(row), studentId: '匿名校内成员' })) });
+  }
+
+  const teacherReviewMatch = path.match(/^\/api\/review\/teachers\/([a-zA-Z0-9_-]+)$/);
+  if (method === 'POST' && teacherReviewMatch) {
+    const limited = enforceMutationRate(request, 'teacher-review', 120);
+    if (limited) return limited;
+    const auth = await requireUser(request, ['reviewer', 'admin']);
+    if (auth.response) return auth.response;
+    const data = await readJson(request);
+    const action = data?.action;
+    const note = normalizeText(data?.note, 1000);
+    if (!['approve', 'reject'].includes(action)) return error('未知审核操作');
+    if (action === 'reject' && !note) return error('不采用时请填写原因');
+    const submission = withoutId(await getDocument('teacher_submissions', teacherReviewMatch[1]));
+    if (!submission || submission.status !== 'pending') return error('教师补充请求不存在或已经处理', 409);
+    const timestamp = now();
+    if (action === 'approve') {
+      const existingAddition = (await queryDocuments('teacher_additions', { name: submission.name }, 1))[0];
+      if (KNOWN_TEACHER_NAMES.has(submission.name) || (existingAddition && existingAddition.source_submission_id !== submission.id)) {
+        return error('教师索引中已经有这位老师', 409);
+      }
+      if (!existingAddition) {
+        const additionId = `community-${submission.id}`;
+        await setDocument('teacher_additions', additionId, {
+          id: additionId,
+          name: submission.name,
+          subject: submission.subject,
+          motto: submission.motto,
+          submitted_by: submission.student_id,
+          source_submission_id: submission.id,
+          approved_by: auth.user.student_id,
+          approved_at: timestamp
+        });
+      }
+    }
+    const status = action === 'approve' ? 'approved' : 'rejected';
+    await setDocument('teacher_submissions', submission.id, {
+      ...submission,
+      status,
+      review_note: note,
+      reviewer_id: auth.user.student_id,
+      updated_at: timestamp,
+      reviewed_at: timestamp
+    });
+    return result({ ok: true, status });
   }
 
   const reviewMatch = path.match(/^\/api\/review\/([a-zA-Z0-9_-]+)$/);
