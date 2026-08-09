@@ -17,6 +17,7 @@ const {
 } = require('./content.cjs');
 
 const COOKIE = 'campus_session';
+const VISIT_TRACKING_START = Date.parse('2026-08-10T00:00:00+08:00');
 const encoder = new TextEncoder();
 const migrationPath = join(__dirname, 'migration-data.private.json');
 const seed = JSON.parse(readFileSync(existsSync(migrationPath) ? migrationPath : join(__dirname, 'seed-data.json'), 'utf8'));
@@ -327,6 +328,12 @@ function enforceMutationRate(request, scope, limit, windowMs = 60_000) {
   return null;
 }
 
+async function readVisitCount() {
+  const stats = withoutId(await getDocument('site_stats', 'all'));
+  const total = Number(stats?.total);
+  return Number.isSafeInteger(total) && total >= 0 ? total : 0;
+}
+
 async function rememberNamedContributor(studentId, displayName, timestamp = now()) {
   if (!displayName || displayName === '匿名同学') return null;
   const existing = withoutId(await getDocument('contributors', studentId));
@@ -357,6 +364,22 @@ async function route(request) {
   }
 
   await ensureSeed();
+
+  if (method === 'GET' && path === '/api/visits') {
+    return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10' });
+  }
+
+  if (method === 'POST' && path === '/api/visits') {
+    const limited = enforceMutationRate(request, 'visit', 600);
+    if (limited) return limited;
+    if (Date.now() < VISIT_TRACKING_START) {
+      return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10', counted: false });
+    }
+    const visitId = normalizeText((await readJson(request))?.visitId, 96);
+    if (!/^[A-Za-z0-9_-]{16,96}$/.test(visitId)) return error('访问标识无效');
+    await setDocument('site_visit_events', visitId, { visit_id: visitId, created_at: now() });
+    return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10', counted: true });
+  }
 
   if (method === 'GET' && path === '/api/bootstrap') {
     const [sections, articles, contributors, teacherAdditions] = await Promise.all([

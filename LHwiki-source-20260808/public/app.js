@@ -3,7 +3,7 @@ import { formatDate } from './date.js';
 import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js';
 
-const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, search: '', editing: null, articleEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
+const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
 const loginDialog = document.querySelector('#login-dialog');
 const statusLabels = { pending: '等待审核', changes_requested: '需修改', approved: '已发布', rejected: '未采用' };
@@ -502,13 +502,45 @@ function personCard(name, detail) {
   return `<article class="credit-person"><span class="credit-avatar" aria-hidden="true">${esc(initial)}</span><div><strong>${esc(name)}</strong><p>${esc(detail)}</p></div></article>`;
 }
 
+function visitCounter() {
+  const total = Number.isSafeInteger(state.visitCount) ? state.visitCount.toLocaleString('zh-CN') : '—';
+  return `<aside class="visit-counter" aria-label="网站累计浏览量"><span>累计浏览</span><strong data-visit-count>${total}</strong><small>次 · 自 8 月 10 日起统计</small></aside>`;
+}
+
 function thanksPage() {
   const contributors = state.contributors.length
     ? state.contributors.map(item => personCard(item.displayName, '实名内容贡献者')).join('')
     : `<div class="credit-empty">第一位实名内容贡献者会从这里开始。匿名投稿仍会被同样认真地审核。</div>`;
   return `<header class="page-heading thanks-heading"><span class="eyebrow">ACKNOWLEDGEMENTS</span><h1>谢谢每一个把经验留下的人</h1><p>网站由代码搭起，也由一篇篇具体的讲述真正完成。这里只记录投稿者主动选择公开的署名。</p></header>
     <section class="credit-section developer-credit"><div class="credit-intro"><span>01 / DEVELOPERS</span><h2>开发者</h2><p>负责网站构建、前后端开发、UI 设计与部署维护。</p></div><div class="credit-people">${personCard('Chenrx', '网站构建 · UI 设计 · 全栈开发')}</div></section>
-    <section class="credit-section"><div class="credit-intro"><span>02 / WRITERS</span><h2>内容贡献者</h2><p>实名投稿经审核通过后，每个学号在这里留下一个名字，以第一次实名投稿署名为准。</p></div><div class="credit-people">${contributors}</div></section>`;
+    <section class="credit-section"><div class="credit-intro"><span>02 / WRITERS</span><h2>内容贡献者</h2><p>实名投稿经审核通过后，每个学号在这里留下一个名字，以第一次实名投稿署名为准。</p></div><div class="credit-people">${contributors}</div></section>
+    ${visitCounter()}`;
+}
+
+function makeVisitId() {
+  if (globalThis.crypto?.randomUUID) return `view_${crypto.randomUUID()}`;
+  return `view_${Date.now()}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function showVisitCount() {
+  const element = document.querySelector('[data-visit-count]');
+  if (element && Number.isSafeInteger(state.visitCount)) element.textContent = state.visitCount.toLocaleString('zh-CN');
+}
+
+async function recordVisit() {
+  try {
+    const data = await api('/api/visits', { method: 'POST', body: { visitId: makeVisitId() } });
+    state.visitCount = Number(data.total);
+  } catch {
+    try {
+      const data = await api('/api/visits');
+      state.visitCount = Number(data.total);
+    } catch {
+      return;
+    }
+  }
+  if (!Number.isSafeInteger(state.visitCount) || state.visitCount < 0) state.visitCount = null;
+  showVisitCount();
 }
 
 function renderBlocks(container, blocks = [], { anchors = false } = {}) {
@@ -719,6 +751,7 @@ async function init() {
     const [bootstrap, session] = await Promise.all([api('/api/bootstrap'), api('/api/session')]);
     state.sections = bootstrap.sections; state.articles = bootstrap.articles; state.contributors = bootstrap.contributors || []; state.teacherAdditions = bootstrap.teacherAdditions || []; state.user = session.user;
     window.addEventListener('hashchange', render); render();
+    void recordVisit();
   } catch (err) { app.innerHTML = errorView(`初始化失败：${err.message}`, true); }
 }
 

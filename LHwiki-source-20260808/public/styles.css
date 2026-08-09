@@ -279,6 +279,9 @@ textarea { min-height: 92px; resize: vertical; }
 .credit-person strong { font: 700 18px var(--serif); }
 .credit-person p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 .credit-empty { grid-column: 1 / -1; padding: 24px 0; border-top: 1px solid var(--line); color: var(--muted); }
+.visit-counter { display: grid; grid-template-columns: auto auto; justify-content: end; align-items: baseline; gap: 2px 7px; margin: 22px 2px 0 auto; color: #8a8984; font-size: 11px; text-align: right; }
+.visit-counter strong { color: #666862; font: 600 14px var(--serif); font-variant-numeric: tabular-nums; }
+.visit-counter small { grid-column: 1 / -1; color: #a09d96; font-size: 10px; letter-spacing: .02em; }
 .mobile-menu { display: none; }
 @media (max-width: 950px) {
   .shell { display: block; }
@@ -315,6 +318,7 @@ textarea { min-height: 92px; resize: vertical; }
   .article-row { grid-template-columns: 1fr; gap: 8px; }
   .form-card { padding: 23px 18px; }
   .byline-panel, .credit-people { grid-template-columns: 1fr; }
+  .visit-counter { justify-content: start; margin: 18px 0 0; text-align: left; }
   .writing-paper { padding: 22px 15px; }
   .editor-chrome { align-items: flex-start; flex-direction: column; }
   .editor-hint { white-space: normal; }
