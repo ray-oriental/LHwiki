@@ -24,8 +24,23 @@ test('CloudBase PostgreSQL adapter defines a stable primary key for every table'
     contributors: 'student_id',
     drafts: 'id',
     teacher_submissions: 'id',
-    teacher_additions: 'id'
+    teacher_additions: 'id',
+    site_stats: 'key',
+    site_visit_events: 'visit_id'
   });
+});
+
+test('visit counter is persistent, idempotent and does not block app initialization', async () => {
+  const server = await readFile(new URL('../cloudbase/functions/lhwiki-api/server.js', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../cloudbase/migrations/20260809230000_add_site_visit_counter.sql', import.meta.url), 'utf8');
+  assert.match(server, /path === '\/api\/visits'/);
+  assert.match(server, /setDocument\('site_visit_events', visitId/);
+  assert.match(server, /VISIT_TRACKING_START/);
+  assert.match(client, /void recordVisit\(\)/);
+  assert.match(client, /自 8 月 10 日起统计/);
+  assert.match(migration, /visit_id varchar\(96\) PRIMARY KEY/);
+  assert.match(migration, /ON CONFLICT \(key\).*total = site_stats\.total \+ 1/s);
 });
 
 test('teacher additions use a moderated request before entering the public index', async () => {

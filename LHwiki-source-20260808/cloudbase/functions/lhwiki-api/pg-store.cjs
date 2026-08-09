@@ -9,7 +9,9 @@ const PRIMARY_KEYS = Object.freeze({
   contributors: 'student_id',
   drafts: 'id',
   teacher_submissions: 'id',
-  teacher_additions: 'id'
+  teacher_additions: 'id',
+  site_stats: 'key',
+  site_visit_events: 'visit_id'
 });
 
 function primaryKey(table) {

@@ -26,7 +26,7 @@ test('teacher index includes records from the full official category', () => {
   assert.equal(byName.get('祁京生')?.subject, '数学');
   assert.equal(byName.get('崔长华')?.subject, '信息技术');
   assert.equal(byName.get('任娟')?.subject, '化学');
-  assert.equal(byName.get('李玉萍')?.subject, '班主任');
+  assert.equal(byName.get('李玉萍')?.subject, '语文');
   assert.equal(byName.get('张丁丁')?.subject, '英语');
 });
 
@@ -42,4 +42,10 @@ test('community supplement keeps unknown teacher details empty', () => {
     sourceLabel: '校内成员补充',
     publishedAt: ''
   });
+});
+
+test('teacher index has no homeroom category and lists Li Yuping under Chinese', () => {
+  const liYuping = TEACHERS.find(teacher => teacher.name === '李玉萍');
+  assert.equal(liYuping?.subject, '语文');
+  assert.equal(TEACHERS.some(teacher => teacher.subject === '班主任'), false);
 });

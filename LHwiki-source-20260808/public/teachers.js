@@ -764,7 +764,7 @@ export const TEACHERS = [
   {
     "id": "official-1481",
     "name": "李玉萍",
-    "subject": "班主任",
+    "subject": "语文",
     "motto": "教育应该是温暖且有力量的，教育者要和学生“同频共振”。",
     "profile": "官网公开资料显示：中共党员，高级教师，北京市骨干班主任，曾获北京市紫禁杯优秀班主任、通州区十佳班主任、通州区运河育人杯优秀班主任、通州区优秀班主任称号，2021年被评为通州区“我最喜爱的老师”。",
     "sourceUrl": "https://www.luhe.cn/article/show/1481.html",
