@@ -1,4 +1,4 @@
-import { TEACHERS } from './teachers.js?v=20260808-qu-lianhong';
+import { TEACHERS } from './teachers.js?v=20260809-li-yuping-language';
 import { formatDate } from './date.js';
 import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js';
