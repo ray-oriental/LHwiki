@@ -4,8 +4,12 @@ const origins = (process.env.LHWIKI_ORIGINS || [
 ].join(',')).split(',').map(value => value.trim().replace(/\/$/, '')).filter(Boolean);
 
 const timeoutMs = Number(process.env.LHWIKI_TIMEOUT_MS || 10000);
-const concurrency = Math.max(1, Math.min(20, Number(process.env.LHWIKI_CONCURRENCY || 10)));
-const rounds = Math.max(1, Math.min(20, Number(process.env.LHWIKI_ROUNDS || 5)));
+const quick = process.argv.includes('--quick');
+// Production checks are deliberately bounded. This script is a health probe,
+// not a load generator; keeping the ceiling here prevents an accidental CI or
+// scheduler configuration from consuming a large CloudBase point budget.
+const concurrency = Math.max(1, Math.min(4, Number(process.env.LHWIKI_CONCURRENCY || 2)));
+const rounds = Math.max(1, Math.min(5, Number(process.env.LHWIKI_ROUNDS || 2)));
 const results = [];
 
 async function probe(origin, path, expectation) {
@@ -34,7 +38,7 @@ async function probe(origin, path, expectation) {
   }
 }
 
-const baseline = [
+const fullBaseline = [
   ['/', 'html'],
   ['/styles.css', 'script'],
   ['/app.js', 'script'],
@@ -44,13 +48,22 @@ const baseline = [
   ['/api/bootstrap', 'json'],
   ['/api/session', 'json']
 ];
+const quickBaseline = [
+  ['/', 'html'],
+  ['/app.js', 'script'],
+  ['/api/health', 'json'],
+  ['/api/bootstrap', 'json']
+];
+
+const requestBudget = quick ? origins.length * quickBaseline.length : origins.length * (fullBaseline.length + rounds);
+if (requestBudget > 30) throw new Error(`稳定性巡检请求预算超限：${requestBudget} > 30`);
 
 for (const origin of origins) {
-  results.push(...await Promise.all(baseline.map(([path, type]) => probe(origin, path, type))));
+  results.push(...await Promise.all((quick ? quickBaseline : fullBaseline).map(([path, type]) => probe(origin, path, type))));
 }
 
 const queue = [];
-for (const origin of origins) for (let index = 0; index < rounds; index += 1) queue.push([origin, '/api/bootstrap', 'json']);
+if (!quick) for (const origin of origins) for (let index = 0; index < rounds; index += 1) queue.push([origin, '/api/bootstrap', 'json']);
 for (let offset = 0; offset < queue.length; offset += concurrency) {
   results.push(...await Promise.all(queue.slice(offset, offset + concurrency).map(args => probe(...args))));
 }

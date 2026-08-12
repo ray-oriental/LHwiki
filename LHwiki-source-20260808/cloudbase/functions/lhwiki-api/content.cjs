@@ -14,6 +14,7 @@ const KNOWN_TEACHER_NAMES = new Set([
   '王永娟', '马春', '邵坤', '蒋立新', '王得勇', '秦红霞', '李玉萍', '张希武', '宗宝俊', '张宏',
   '马云荣', '张晓', '夏添', '曾苗苗', '徐维维', '马剑涛', '李书梅', '张丁丁', '曲连红'
 ]);
+for (const name of require('./known-teachers-supplement.cjs')) KNOWN_TEACHER_NAMES.add(name);
 
 function validStudentId(value) {
   return typeof value === 'string' && STUDENT_ID_PATTERN.test(value);

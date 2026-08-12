@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mergeBlocks, normalizeBlocks, splitBlock } from '../public/editor.js';
-import { draftKeyFor } from '../public/draft-manager.js';
+import { mergeBlocks, normalizeBlocks, setCaret, splitBlock } from '../public/editor.js';
+import { DraftManager, draftKeyFor } from '../public/draft-manager.js';
 
 test('editor normalizes legacy blocks and preserves structured headings', () => {
   const blocks = normalizeBlocks([
@@ -28,4 +28,77 @@ test('draft keys distinguish new, submission and article targets', () => {
   assert.match(draftKeyFor('new'), /^new:/);
   assert.equal(draftKeyFor('submission', 'submission-1'), 'submission:submission-1');
   assert.equal(draftKeyFor('article', 'article-slug'), 'article:article-slug');
+});
+
+test('caret restoration keeps the viewport fixed after a block rerender', () => {
+  const calls = [];
+  const textNode = { textContent: 'abcdef' };
+  const element = { firstChild: textNode, focus: options => calls.push(['focus', options]) };
+  const selection = { removeAllRanges() {}, addRange() {} };
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  globalThis.window = { scrollX: 0, scrollY: 0, getSelection: () => selection, scrollTo: (x, y) => calls.push(['scrollTo', x, y]) };
+  globalThis.document = { createRange: () => ({ setStart() {}, collapse() {} }), createTextNode: text => ({ textContent: text }) };
+  try {
+    setCaret(element, 3, { x: 12, y: 640 });
+    assert.deepEqual(calls, [['focus', { preventScroll: true }], ['scrollTo', 12, 640]]);
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.document = originalDocument;
+  }
+});
+
+test('removing a draft waits for an active save and deletes the created cloud draft', async () => {
+  const calls = [];
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem: key => calls.push(['local', key]), setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({
+      api: async (path, options) => {
+        calls.push([options.method, path]);
+        if (options.method === 'POST' || options.method === 'PUT') return { draft: { id: 'draft-1', draftKey: 'new:test', revision: options.method === 'POST' ? 1 : 2, updatedAt: new Date().toISOString(), sectionSlug: '', contentType: '', title: '', summary: '', subject: '', authorLabel: '', anonymous: false, body: [] } };
+        return { ok: true };
+      },
+      userId: '202600043',
+      draftKey: 'new:test'
+    });
+    manager.update({ body: [] });
+    const saving = manager.saveNow();
+    await manager.remove();
+    await saving;
+    assert.ok(calls.some(call => call[0] === 'DELETE' && call[1] === '/api/drafts/draft-1'));
+    assert.equal(manager.id, null);
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('identical editor snapshots do not schedule duplicate cloud writes', () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem() {}, setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({ api: async () => ({ draft: {} }), userId: '202600043', draftKey: 'new:test' });
+    const snapshot = { title: '同一内容', body: [{ id: 'b_12345678', type: 'paragraph', text: '内容' }] };
+    assert.equal(manager.update(snapshot), true);
+    assert.equal(manager.update(snapshot), false);
+    assert.equal(manager.sequence, 1);
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
 });

@@ -1,3 +1,5 @@
+import { TEACHER_DIRECTORY_SUPPLEMENT } from './teachers-supplement.js?v=20260810-directory-supplement-2';
+
 // 根据潞河中学官网‘教师队伍’栏目的全部公开详情页整理。
 // 仅展示职业信息和教育理念；这不是实时在岗花名册。
 export const TEACHERS = [
@@ -890,5 +892,6 @@ export const TEACHERS = [
     "sourceUrl": "",
     "sourceLabel": "校内成员补充",
     "publishedAt": ""
-  }
+  },
+  ...TEACHER_DIRECTORY_SUPPLEMENT
 ];

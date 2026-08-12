@@ -14,6 +14,24 @@ test('CloudBase 后端沿用相同的登入规则', () => {
   assert.equal(cloudbaseContent.validLoginId('20260043'), false);
 });
 
+test('普通学生登入不会把学号扫描放大为数据库写入', async () => {
+  const source = await readFile(new URL('../cloudbase/functions/lhwiki-api/server.js', import.meta.url), 'utf8');
+  assert.match(source, /if \(!origin\) return false/);
+  assert.match(source, /if \(studentId === ADMIN_LOGIN_ID\) await setDocument\('users', studentId, user\)/);
+  assert.match(source, /enforceMutationRate\(request, 'login-sustained', 60, 15 \* 60_000\)/);
+  assert.match(source, /return stored \|\| \{/);
+  assert.doesNotMatch(source, /\n\s*await setDocument\('users', studentId, user\);/);
+  assert.match(source, /async function ensurePersistentUser\(user\)/);
+  assert.match(source, /auth\.user = await ensurePersistentUser\(auth\.user\)/);
+});
+
+test('生产稳定性巡检有明确的低并发和总请求预算', async () => {
+  const source = await readFile(new URL('../scripts/stability-check.mjs', import.meta.url), 'utf8');
+  assert.match(source, /Math\.min\(4, Number\(process\.env\.LHWIKI_CONCURRENCY \|\| 2\)\)/);
+  assert.match(source, /Math\.min\(5, Number\(process\.env\.LHWIKI_ROUNDS \|\| 2\)\)/);
+  assert.match(source, /requestBudget > 30/);
+});
+
 test('CloudBase PostgreSQL adapter defines a stable primary key for every table', () => {
   assert.deepEqual(PRIMARY_KEYS, {
     sections: 'slug',
@@ -30,7 +48,7 @@ test('CloudBase PostgreSQL adapter defines a stable primary key for every table'
   });
 });
 
-test('visit counter is persistent, idempotent and does not block app initialization', async () => {
+test('visit counter batches page opens while preserving the full total', async () => {
   const server = await readFile(new URL('../cloudbase/functions/lhwiki-api/server.js', import.meta.url), 'utf8');
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   const migration = await readFile(new URL('../cloudbase/migrations/20260809230000_add_site_visit_counter.sql', import.meta.url), 'utf8');
@@ -38,9 +56,35 @@ test('visit counter is persistent, idempotent and does not block app initializat
   assert.match(server, /setDocument\('site_visit_events', visitId/);
   assert.match(server, /VISIT_TRACKING_START/);
   assert.match(client, /void recordVisit\(\)/);
+  assert.match(client, /VISIT_FLUSH_DELAY = 20_000/);
+  assert.match(client, /VISIT_BATCH_MAX = 20/);
+  assert.match(client, /localStorage\.setItem\(VISIT_PENDING_KEY, String\(readPendingVisits\(\) \+ 1\)\)/);
+  assert.match(client, /body: batch/);
+  assert.doesNotMatch(client, /VISIT_DAY_KEY/);
+  assert.match(server, /enforceMutationRate\(request, 'visit-sustained', 600, 15 \* 60_000\)/);
+  assert.doesNotMatch(server, /return result\(\{ total: await readVisitCount\(\), trackingStartedAt: '2026-08-10', counted: true \}\)/);
   assert.match(client, /自 8 月 10 日起统计/);
   assert.match(migration, /visit_id varchar\(96\) PRIMARY KEY/);
-  assert.match(migration, /ON CONFLICT \(key\).*total = site_stats\.total \+ 1/s);
+  assert.match(migration, /visit_count integer NOT NULL DEFAULT 1 CHECK \(visit_count BETWEEN 1 AND 20\)/);
+  assert.match(migration, /ON CONFLICT \(key\).*total = site_stats\.total \+ NEW\.visit_count/s);
+  assert.match(server, /visit_count: visitCount/);
+});
+
+test('public browsing favors browser and warm-instance caches', async () => {
+  const server = await readFile(new URL('../cloudbase/functions/lhwiki-api/server.js', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(client, /const BOOTSTRAP_TTL = 15 \* 60_000/);
+  assert.match(client, /readCache\(localStorage, BOOTSTRAP_CACHE_KEY, BOOTSTRAP_TTL\)/);
+  assert.match(client, /await import\('\.\/teachers\.js\?v=20260810-directory-supplement-2'\)/);
+  assert.match(client, /readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
+  assert.match(client, /Promise\.all\(\[loadBootstrap\(\), loadSession\(\)\]\)/);
+  assert.match(server, /const PUBLIC_CACHE_TTL = 2 \* 60_000/);
+  assert.match(server, /async function readPublicBootstrap\(\)/);
+  assert.match(server, /articles: articles\.map\(mapArticleSummary\)/);
+  assert.match(server, /const \{ body_json, \.\.\.summary \} = clean/);
+  assert.match(server, /if \(publicCache && Date\.now\(\) - publicCache\.savedAt < PUBLIC_CACHE_TTL\)/);
+  assert.match(server, /invalidatePublicCache\(\)/);
+  assert.match(server, /max-age=300, stale-while-revalidate=3600/);
 });
 
 test('teacher additions use a moderated request before entering the public index', async () => {
@@ -63,8 +107,12 @@ test('teacher additions use a moderated request before entering the public index
 
 test('known teacher names guard against duplicate community additions', () => {
   assert.ok(cloudbaseContent.KNOWN_TEACHER_NAMES instanceof Set);
-  assert.ok(cloudbaseContent.KNOWN_TEACHER_NAMES.size >= 80);
+  assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.size, 209);
   assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.has('曲连红'), true);
+  assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.has('邵红梅'), true);
+  assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.has('肖红蕊'), true);
+  assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.has('李柯'), true);
+  assert.equal(cloudbaseContent.KNOWN_TEACHER_NAMES.has('张英杰'), true);
 });
 
 test('致谢板块只公开显示名，不需要把学号发送到前端', async () => {
@@ -160,6 +208,20 @@ test('受保护管理员不能被权限接口降权，并拥有已发布文章�
   assert.match(source, /adminArticleMatch && \['PUT', 'DELETE'\]\.includes\(method\)/);
   assert.match(source, /requireUser\(request, \['admin'\]\)/);
   assert.match(source, /deleteDocument\('articles', slug\)/);
+});
+
+test('管理员可以校订待审核稿件但不会绕过审核或改变投稿归属', async () => {
+  const server = await readFile(new URL('../cloudbase/functions/lhwiki-api/server.js', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../cloudbase/migrations/20260811022500_allow_admin_review_edits.sql', import.meta.url), 'utf8');
+  assert.match(server, /submission\.student_id === user\.student_id \|\| user\.role === 'admin'/);
+  assert.match(server, /rememberNamedContributor\(submission\.student_id, author_label\)/);
+  assert.match(server, /action: 'admin_edit'/);
+  assert.match(server, /status: 'pending', review_note: ''/);
+  assert.match(client, /data-edit-pending/);
+  assert.match(client, /admin-review-edit/);
+  assert.match(client, /待审核稿件已更新/);
+  assert.match(migration, /'admin_edit'/);
 });
 
 test('公开文章读取不缓存旧正文，管理员保存后刷新仍保持更新', async () => {

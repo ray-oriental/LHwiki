@@ -6,6 +6,7 @@ CREATE TABLE public.site_stats (
 
 CREATE TABLE public.site_visit_events (
   visit_id varchar(96) PRIMARY KEY,
+  visit_count integer NOT NULL DEFAULT 1 CHECK (visit_count BETWEEN 1 AND 20),
   created_at timestamptz NOT NULL
 );
 
@@ -17,9 +18,9 @@ SET search_path = public
 AS $$
 BEGIN
   INSERT INTO public.site_stats (key, total, tracking_started_at)
-  VALUES ('all', 1, '2026-08-10T00:00:00+08:00')
+  VALUES ('all', NEW.visit_count, '2026-08-10T00:00:00+08:00')
   ON CONFLICT (key) DO UPDATE
-  SET total = site_stats.total + 1;
+  SET total = site_stats.total + NEW.visit_count;
   RETURN NEW;
 END;
 $$;
