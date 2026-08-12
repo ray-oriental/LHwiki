@@ -1,4 +1,6 @@
-const SAVE_DELAY = 1200;
+// Local persistence stays near-instant; cloud writes are coalesced until the
+// writer pauses, which keeps the editor responsive without charging per keypress.
+const SAVE_DELAY = 4000;
 const LOCAL_DELAY = 220;
 const RETRY_DELAYS = [2000, 5000, 15000, 30000];
 
@@ -8,6 +10,10 @@ function storageKey(userId, draftKey) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function fingerprint(value) {
+  return JSON.stringify(value);
 }
 
 export function draftKeyFor(targetType, targetId = null) {
@@ -50,6 +56,7 @@ export class DraftManager {
     this.id = draft?.id || null;
     this.revision = draft?.revision || null;
     this.snapshot = draft ? this.snapshotFromDraft(draft) : null;
+    this.snapshotFingerprint = this.snapshot ? fingerprint(this.snapshot) : null;
     this.updatedAt = draft?.updatedAt || null;
     this.onState = onState;
     this.onConflict = onConflict;
@@ -61,6 +68,7 @@ export class DraftManager {
     this.retryTimer = null;
     this.retryIndex = 0;
     this.conflicted = false;
+    this.removing = false;
     this.lastState = 'saved';
     this.channel = this.createChannel();
     this.onlineHandler = () => this.sequence > this.savedSequence && this.saveNow();
@@ -100,6 +108,7 @@ export class DraftManager {
     const local = this.local();
     if (local && (!this.updatedAt || Date.parse(local.savedAt) > Date.parse(this.updatedAt))) {
       this.snapshot = clone(local.snapshot);
+      this.snapshotFingerprint = fingerprint(this.snapshot);
       this.sequence = Number(local.sequence) || 1;
       this.savedSequence = Number(local.savedSequence) || 0;
       this.id = this.id || local.draftId || null;
@@ -109,17 +118,23 @@ export class DraftManager {
       return clone(this.snapshot);
     }
     this.snapshot = clone(this.snapshot || initialSnapshot);
+    this.snapshotFingerprint = fingerprint(this.snapshot);
     return clone(this.snapshot);
   }
 
   update(snapshot) {
-    this.snapshot = clone(snapshot);
+    const nextSnapshot = clone(snapshot);
+    const nextFingerprint = fingerprint(nextSnapshot);
+    if (nextFingerprint === this.snapshotFingerprint) return false;
+    this.snapshot = nextSnapshot;
+    this.snapshotFingerprint = nextFingerprint;
     this.sequence += 1;
     this.setState(navigator.onLine ? 'dirty' : 'offline', navigator.onLine ? '有修改尚未保存' : '离线：已保存在这台设备');
     clearTimeout(this.localTimer);
     this.localTimer = setTimeout(() => this.persistLocal(), LOCAL_DELAY);
     clearTimeout(this.timer);
     if (!this.conflicted && navigator.onLine) this.timer = setTimeout(() => this.saveNow(), SAVE_DELAY);
+    return true;
   }
 
   persistLocal(sync = false) {
@@ -187,6 +202,7 @@ export class DraftManager {
       else this.setState('dirty', '保存期间有新修改，正在继续保存');
       return draft;
     } catch (error) {
+      if (this.removing) return null;
       if (error.status === 409 && error.data?.conflict) {
         this.conflicted = true;
         this.setState('conflict', '这份草稿已在其他页面更新');
@@ -214,8 +230,19 @@ export class DraftManager {
   }
 
   async remove() {
+    this.removing = true;
+    clearTimeout(this.timer);
+    clearTimeout(this.localTimer);
+    clearTimeout(this.retryTimer);
+    if (this.saving) await this.saving;
     if (this.id) await this.api(`/api/drafts/${encodeURIComponent(this.id)}`, { method: 'DELETE' });
     clearLocalDraft(this.userId, this.draftKey);
+    this.snapshot = null;
+    this.snapshotFingerprint = null;
+    this.id = null;
+    this.revision = null;
+    this.sequence = 0;
+    this.savedSequence = 0;
   }
 
   adoptCloud(draft) {
@@ -224,6 +251,7 @@ export class DraftManager {
     this.revision = draft.revision;
     this.updatedAt = draft.updatedAt;
     this.snapshot = this.snapshotFromDraft(draft);
+    this.snapshotFingerprint = fingerprint(this.snapshot);
     this.sequence += 1;
     this.savedSequence = this.sequence;
     this.conflicted = false;
@@ -243,6 +271,7 @@ export class DraftManager {
     this.channel?.close();
     this.channel = this.createChannel();
     this.snapshot = clone(snapshot);
+    this.snapshotFingerprint = fingerprint(this.snapshot);
     this.sequence += 1;
     this.savedSequence = 0;
     this.conflicted = false;

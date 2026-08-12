@@ -1,12 +1,30 @@
-import { TEACHERS } from './teachers.js?v=20260809-li-yuping-language';
 import { formatDate } from './date.js';
-import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js';
-import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js';
+import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js?v=20260810-editor-stability';
+import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js?v=20260811-resource-budget';
 
-const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
+const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
 const loginDialog = document.querySelector('#login-dialog');
 const statusLabels = { pending: '等待审核', changes_requested: '需修改', approved: '已发布', rejected: '未采用' };
+const CACHE_VERSION = '20260811-visit-batching';
+const BOOTSTRAP_CACHE_KEY = `lhwiki:bootstrap:${CACHE_VERSION}`;
+const SESSION_CACHE_KEY = `lhwiki:session:${CACHE_VERSION}`;
+const VISIT_BROWSER_KEY = 'lhwiki:visit:browser';
+const VISIT_PENDING_KEY = 'lhwiki:visit:pending';
+const VISIT_BATCH_KEY = 'lhwiki:visit:batch';
+const VISIT_TOTAL_KEY = 'lhwiki:visit:total';
+const BOOTSTRAP_TTL = 15 * 60_000;
+const SESSION_TTL = 5 * 60_000;
+const VISIT_TOTAL_TTL = 6 * 60 * 60_000;
+const VISIT_FLUSH_DELAY = 20_000;
+const VISIT_BATCH_MAX = 20;
+let visitFlushTimer = null;
+let baseTeachers = null;
+
+async function ensureTeachers() {
+  if (!baseTeachers) ({ TEACHERS: baseTeachers } = await import('./teachers.js?v=20260810-directory-supplement-2'));
+  return baseTeachers;
+}
 
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 
@@ -26,7 +44,7 @@ async function api(path, options = {}) {
         headers: { 'content-type': 'application/json', ...options.headers },
         body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body
       });
-      if (attempt < maxAttempts && [429, 502, 503, 504].includes(response.status)) {
+      if (attempt < maxAttempts && [502, 503, 504].includes(response.status)) {
         await response.text().catch(() => '');
         await new Promise(resolve => setTimeout(resolve, 250 * attempt));
         continue;
@@ -53,6 +71,58 @@ async function api(path, options = {}) {
   return data;
 }
 
+function readCache(storage, key, ttl) {
+  try {
+    const cached = JSON.parse(storage.getItem(key) || 'null');
+    return cached?.savedAt && Date.now() - cached.savedAt < ttl ? cached.value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(storage, key, value) {
+  try { storage.setItem(key, JSON.stringify({ savedAt: Date.now(), value })); } catch { /* private mode can disable storage */ }
+}
+
+function clearCache(storage, key) {
+  try { storage.removeItem(key); } catch { /* private mode can disable storage */ }
+}
+
+function applyBootstrap(bootstrap) {
+  state.sections = bootstrap.sections || [];
+  state.articles = bootstrap.articles || [];
+  state.contributors = bootstrap.contributors || [];
+  state.teacherAdditions = bootstrap.teacherAdditions || [];
+}
+
+async function loadBootstrap({ force = false } = {}) {
+  if (!force) {
+    const cached = readCache(localStorage, BOOTSTRAP_CACHE_KEY, BOOTSTRAP_TTL);
+    if (cached) return cached;
+  }
+  const bootstrap = await api(force ? `/api/bootstrap?refresh=${Date.now()}` : '/api/bootstrap', force ? { cache: 'reload' } : {});
+  writeCache(localStorage, BOOTSTRAP_CACHE_KEY, bootstrap);
+  return bootstrap;
+}
+
+async function refreshBootstrap() {
+  const bootstrap = await loadBootstrap({ force: true });
+  applyBootstrap(bootstrap);
+  return bootstrap;
+}
+
+async function loadSession() {
+  const cached = readCache(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL);
+  if (cached) return cached;
+  const session = await api('/api/session');
+  writeCache(sessionStorage, SESSION_CACHE_KEY, session);
+  return session;
+}
+
+function cacheSession(user) {
+  writeCache(sessionStorage, SESSION_CACHE_KEY, { user });
+}
+
 function toast(message) {
   const element = document.querySelector('#toast');
   element.textContent = message;
@@ -74,7 +144,7 @@ function navLink(href, icon, label, active) {
 function shell(content) {
   const current = route();
   const roleTools = state.user && ['reviewer', 'admin'].includes(state.user.role)
-    ? navLink('#/review', '✓', '审核投稿', current.page === 'review') : '';
+    ? navLink('#/review', '✓', '审核投稿', ['review', 'admin-review-edit'].includes(current.page)) : '';
   const adminTools = state.user?.role === 'admin' ? navLink('#/admin', '⚙', '权限管理', current.page === 'admin') : '';
   app.innerHTML = `<div class="shell">
     <aside class="sidebar" id="sidebar">
@@ -141,7 +211,7 @@ function bindTeacherReviewButtons() {
 
 function allTeachers() {
   const seen = new Set();
-  return [...TEACHERS, ...state.teacherAdditions].filter(teacher => {
+  return [...(baseTeachers || []), ...state.teacherAdditions].filter(teacher => {
     const key = teacher.name.trim().toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
@@ -181,17 +251,36 @@ function sectionPage(slug) {
 function teacherDirectory() {
   const fullIndex = allTeachers();
   const subjects = ['全部', ...new Set(fullIndex.map(item => item.subject).filter(item => item !== '学科待补充'))];
-  const query = state.teacherQuery.trim().toLowerCase();
-  const teachers = fullIndex.filter(teacher => (!query || `${teacher.name}${teacher.subject}${teacher.motto}${teacher.profile}`.toLowerCase().includes(query)) && (state.teacherSubject === '全部' || teacher.subject === state.teacherSubject));
-  const officialCount = TEACHERS.filter(teacher => teacher.sourceUrl).length;
+  const teachers = filteredTeachers(fullIndex);
+  const officialCount = baseTeachers.filter(teacher => teacher.sourceUrl).length;
   const supplementedCount = fullIndex.length - officialCount;
   setTimeout(bindTeacherFilters, 0);
   return `<header class="page-heading teacher-heading"><span class="eyebrow">PUBLIC FACULTY INDEX</span><div class="teacher-heading-row"><div><h1>教师索引</h1><p>这里汇集官网公开教师资料与经审核的校内补充记录。当前包含 ${officialCount} 篇官网资料和 ${supplementedCount} 位补充教师；由于官网并非实时花名册，索引仍可能遗漏任课教师。</p></div><a class="button primary" href="#/teacher-submit">补充一位老师</a></div></header>
     <div class="source-note"><strong>怎样补充教师</strong><span>只需填写姓名、任教学科和可选格言。资料不会立即公开，而会先进入与文章投稿相同的审核流程；审核通过后才加入正式索引。请勿填写联系方式、班级安排或其他私人信息。</span></div>
     <div class="source-note"><strong>关于匿名评价</strong><span>评价不会即时公开，而是进入审核队列。请写清年级、课程场景和大致时间；只谈亲身体验，不公开联系方式、家庭、成绩等隐私，也不接受人身攻击或未经核实的指控。</span></div>
     <div class="teacher-tools"><label class="teacher-search">搜索教师<input id="teacher-search" value="${esc(state.teacherQuery)}" placeholder="输入姓名、学科或关键词"></label><div class="subject-tabs">${subjects.map(subject => `<button class="subject-tab ${state.teacherSubject === subject ? 'active' : ''}" data-subject="${esc(subject)}">${esc(subject)}</button>`).join('')}</div></div>
-    <div class="teacher-count">当前显示 ${teachers.length} 位</div>
+    ${teacherResults(teachers)}`;
+}
+
+function filteredTeachers(fullIndex = allTeachers()) {
+  const query = state.teacherQuery.trim().toLowerCase();
+  return fullIndex.filter(teacher => (!query || `${teacher.name}${teacher.subject}${teacher.motto}${teacher.profile}`.toLowerCase().includes(query)) && (state.teacherSubject === '全部' || teacher.subject === state.teacherSubject));
+}
+
+function teacherResults(teachers = filteredTeachers()) {
+  return `<div class="teacher-count">当前显示 ${teachers.length} 位</div>
     <div class="teacher-grid">${teachers.map(teacherCard).join('')}</div>`;
+}
+
+function renderTeacherResults() {
+  const content = document.querySelector('.content');
+  const count = content?.querySelector('.teacher-count');
+  const grid = content?.querySelector('.teacher-grid');
+  if (!count || !grid) return;
+  const teachers = filteredTeachers();
+  count.textContent = `当前显示 ${teachers.length} 位`;
+  grid.innerHTML = teachers.map(teacherCard).join('');
+  bindTeacherReviewButtons();
 }
 
 function teacherCard(teacher) {
@@ -200,8 +289,12 @@ function teacherCard(teacher) {
 }
 
 function bindTeacherFilters() {
-  document.querySelector('#teacher-search')?.addEventListener('input', event => { state.teacherQuery = event.target.value; document.querySelector('.content').innerHTML = teacherDirectory(); });
-  document.querySelectorAll('[data-subject]').forEach(button => button.addEventListener('click', () => { state.teacherSubject = button.dataset.subject; document.querySelector('.content').innerHTML = teacherDirectory(); }));
+  document.querySelector('#teacher-search')?.addEventListener('input', event => { state.teacherQuery = event.target.value; renderTeacherResults(); });
+  document.querySelectorAll('[data-subject]').forEach(button => button.addEventListener('click', () => {
+    state.teacherSubject = button.dataset.subject;
+    document.querySelectorAll('[data-subject]').forEach(tab => tab.classList.toggle('active', tab.dataset.subject === state.teacherSubject));
+    renderTeacherResults();
+  }));
   bindTeacherReviewButtons();
 }
 
@@ -275,8 +368,7 @@ async function articlePage(slug) {
       if (!confirm(`确定删除《${article.title}》吗？此操作不会删除原投稿和审核记录。`)) return;
       try {
         await api(`/api/admin/articles/${encodeURIComponent(article.slug)}`, { method: 'DELETE' });
-        const fresh = await api(`/api/bootstrap?refresh=${Date.now()}`);
-        state.sections = fresh.sections; state.articles = fresh.articles; state.contributors = fresh.contributors || [];
+        await refreshBootstrap();
         toast('已删除已发布稿件');
         location.hash = '#/';
       } catch (err) { toast(err.message); }
@@ -317,6 +409,16 @@ async function resolveWritingContext() {
     const article = state.articleEditing?.slug === slug ? state.articleEditing : (await api(`/api/articles/${encodeURIComponent(slug)}`, { cache: 'no-store' })).article;
     return { targetType: 'article', targetId: slug, source: article, draft: drafts.find(item => item.draftKey === `article:${slug}`), isArticleEdit: true };
   }
+  if (current.page === 'admin-review-edit') {
+    if (state.user?.role !== 'admin') throw new Error('需要管理员权限');
+    const submissionId = current.value || state.reviewEditing?.id;
+    if (!submissionId) throw new Error('没有选择要编辑的待审核稿件');
+    const submission = state.reviewEditing?.id === submissionId
+      ? state.reviewEditing
+      : (await api('/api/review')).submissions.find(item => item.id === submissionId);
+    if (!submission) throw new Error('没有找到这份待审核稿件');
+    return { targetType: 'submission', targetId: submission.id, source: submission, draft: drafts.find(item => item.draftKey === `submission:${submission.id}`), isArticleEdit: false, isReviewEdit: true };
+  }
   const token = current.value || '';
   if (token.startsWith('draft:')) {
     const draft = drafts.find(item => item.id === token.slice(6));
@@ -347,8 +449,8 @@ async function contributePage() {
   try {
     const context = await resolveWritingContext();
     const initial = snapshotFromSource(context.source, context.draft ? null : state.contributionPreset);
-    const title = context.isArticleEdit ? `编辑《${esc(initial.title)}》` : context.targetType === 'submission' ? '继续修改这份投稿' : '把经历写具体';
-    shell(`<header class="page-heading writing-heading"><span class="eyebrow">${context.isArticleEdit ? '管理已发布内容' : context.targetType === 'submission' ? '修改后重新审核' : '自动保存的写作页'}</span><h1>${title}</h1><p>直接写下内容即可。按 Enter 新建段落，输入 / 切换格式，系统会自动保存。</p></header>
+    const title = context.isArticleEdit ? `编辑《${esc(initial.title)}》` : context.isReviewEdit ? `校订《${esc(initial.title)}》` : context.targetType === 'submission' ? '继续修改这份投稿' : '把经历写具体';
+    shell(`<header class="page-heading writing-heading"><span class="eyebrow">${context.isArticleEdit ? '管理已发布内容' : context.isReviewEdit ? '管理员校订待审核稿件' : context.targetType === 'submission' ? '修改后重新审核' : '自动保存的写作页'}</span><h1>${title}</h1><p>${context.isReviewEdit ? '修改会保存回原待审核稿件，并继续留在审核队列，不会自动发布。' : '直接写下内容即可。按 Enter 新建段落，输入 / 切换格式，系统会自动保存。'}</p></header>
       <form class="writing-layout" id="contribution-form">
         <section class="writing-paper">
           <div class="notice compact">学号只用于校内成员筛选和保存投稿记录，不会出现在公开内容或审核队列中。</div>
@@ -361,7 +463,7 @@ async function contributePage() {
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
         </section>
-        <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>准备自动保存</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，自动保存已经暂停。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : '提交审核'}</button><p class="form-error" data-form-error></p></aside>
+        <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>准备自动保存</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，自动保存已经暂停。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>清除本机与云端尚未提交的内容</small></div><p class="form-error" data-form-error></p></aside>
         <dialog class="preview-dialog" id="preview-dialog"><div class="preview-head"><strong>投稿预览</strong><button type="button" class="icon-button" data-close-preview aria-label="关闭预览">×</button></div><article class="prose" id="preview-prose"></article></dialog>
       </form>`);
     bindEditorExperience(context, initial);
@@ -450,6 +552,29 @@ function bindEditorExperience(context, initial) {
   });
   document.querySelectorAll('[data-editor-type]').forEach(button => button.addEventListener('click', () => editor.setCurrentType(button.dataset.editorType)));
   document.querySelector('[data-save-now]').addEventListener('click', () => manager.saveNow());
+  document.querySelector('[data-delete-current-draft]').addEventListener('click', async event => {
+    if (!confirm('确定删除这份草稿吗？所有尚未提交的内容都会被清除，且无法恢复。')) return;
+    const button = event.currentTarget;
+    const errorElement = form.querySelector('[data-form-error]');
+    button.disabled = true;
+    errorElement.textContent = '';
+    try {
+      await manager.remove();
+      manager.destroy();
+      state.activeDraftManager = null;
+      state.activeEditor = null;
+      state.editing = null;
+      state.articleEditing = null;
+      state.reviewEditing = null;
+      state.contributionPreset = null;
+      state.forceNewDraft = true;
+      toast('草稿已删除');
+      location.hash = context.isReviewEdit ? '#/review' : '#/mine';
+    } catch (err) {
+      button.disabled = false;
+      errorElement.textContent = `删除失败：${err.message}`;
+    }
+  });
   document.querySelector('[data-preview]').addEventListener('click', () => {
     const preview = document.querySelector('#preview-prose');
     preview.replaceChildren();
@@ -480,6 +605,7 @@ function bindEditorExperience(context, initial) {
       const result = await manager.submit();
       state.editing = null;
       state.articleEditing = null;
+      state.reviewEditing = null;
       state.contributionPreset = null;
       state.activeDraftManager = null;
       manager.destroy();
@@ -487,6 +613,9 @@ function bindEditorExperience(context, initial) {
         state.articleCacheBust = result.slug || context.targetId;
         toast('已更新公开文章');
         location.hash = `#/article/${encodeURIComponent(result.slug || context.targetId)}`;
+      } else if (context.isReviewEdit) {
+        toast('待审核稿件已更新');
+        location.hash = '#/review';
       } else {
         toast('投稿已进入审核队列');
         location.hash = '#/mine';
@@ -511,15 +640,29 @@ function thanksPage() {
   const contributors = state.contributors.length
     ? state.contributors.map(item => personCard(item.displayName, '实名内容贡献者')).join('')
     : `<div class="credit-empty">第一位实名内容贡献者会从这里开始。匿名投稿仍会被同样认真地审核。</div>`;
+  queueMicrotask(() => void flushPendingVisits({ drain: true }).then(() => refreshVisitCount({ force: true })));
   return `<header class="page-heading thanks-heading"><span class="eyebrow">ACKNOWLEDGEMENTS</span><h1>谢谢每一个把经验留下的人</h1><p>网站由代码搭起，也由一篇篇具体的讲述真正完成。这里只记录投稿者主动选择公开的署名。</p></header>
     <section class="credit-section developer-credit"><div class="credit-intro"><span>01 / DEVELOPERS</span><h2>开发者</h2><p>负责网站构建、前后端开发、UI 设计与部署维护。</p></div><div class="credit-people">${personCard('Chenrx', '网站构建 · UI 设计 · 全栈开发')}</div></section>
     <section class="credit-section"><div class="credit-intro"><span>02 / WRITERS</span><h2>内容贡献者</h2><p>实名投稿经审核通过后，每个学号在这里留下一个名字，以第一次实名投稿署名为准。</p></div><div class="credit-people">${contributors}</div></section>
     ${visitCounter()}`;
 }
 
+function visitBrowserId() {
+  try {
+    let id = localStorage.getItem(VISIT_BROWSER_KEY);
+    if (!id) {
+      id = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(VISIT_BROWSER_KEY, id);
+    }
+    return id;
+  } catch {
+    return `ephemeral_${Math.random().toString(36).slice(2)}`;
+  }
+}
+
 function makeVisitId() {
-  if (globalThis.crypto?.randomUUID) return `view_${crypto.randomUUID()}`;
-  return `view_${Date.now()}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+  const nonce = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return `view_${visitBrowserId()}_${nonce}`.replaceAll('.', '_').slice(0, 96);
 }
 
 function showVisitCount() {
@@ -527,20 +670,90 @@ function showVisitCount() {
   if (element && Number.isSafeInteger(state.visitCount)) element.textContent = state.visitCount.toLocaleString('zh-CN');
 }
 
-async function recordVisit() {
+function readPendingVisits() {
   try {
-    const data = await api('/api/visits', { method: 'POST', body: { visitId: makeVisitId() } });
-    state.visitCount = Number(data.total);
+    const value = Number(localStorage.getItem(VISIT_PENDING_KEY));
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
   } catch {
-    try {
-      const data = await api('/api/visits');
-      state.visitCount = Number(data.total);
-    } catch {
-      return;
-    }
+    return 0;
   }
-  if (!Number.isSafeInteger(state.visitCount) || state.visitCount < 0) state.visitCount = null;
+}
+
+function scheduleVisitFlush(delay = VISIT_FLUSH_DELAY) {
+  if (visitFlushTimer) clearTimeout(visitFlushTimer);
+  visitFlushTimer = setTimeout(() => {
+    visitFlushTimer = null;
+    void flushPendingVisits();
+  }, delay);
+}
+
+function readVisitBatch() {
+  try {
+    const batch = JSON.parse(localStorage.getItem(VISIT_BATCH_KEY) || 'null');
+    return batch && /^[A-Za-z0-9_-]{16,96}$/.test(batch.visitId)
+      && Number.isSafeInteger(batch.count) && batch.count >= 1 && batch.count <= VISIT_BATCH_MAX
+      ? batch : null;
+  } catch {
+    return null;
+  }
+}
+
+async function flushPendingVisits({ drain = false } = {}) {
+  let batch = readVisitBatch();
+  if (!batch) {
+    const pending = readPendingVisits();
+    if (!pending) return;
+    batch = { visitId: makeVisitId(), count: Math.min(pending, VISIT_BATCH_MAX) };
+    try {
+      localStorage.setItem(VISIT_BATCH_KEY, JSON.stringify(batch));
+      localStorage.setItem(VISIT_PENDING_KEY, String(pending - batch.count));
+    } catch { /* private mode falls back to one in-memory request */ }
+  }
+  try {
+    await api('/api/visits', { method: 'POST', body: batch });
+    try { localStorage.removeItem(VISIT_BATCH_KEY); } catch { /* storage may be unavailable */ }
+    if (Number.isSafeInteger(state.visitCount)) {
+      state.visitCount += batch.count;
+      writeCache(localStorage, VISIT_TOTAL_KEY, state.visitCount);
+      showVisitCount();
+    }
+    if (readPendingVisits() > 0) {
+      if (drain) return flushPendingVisits({ drain: true });
+      scheduleVisitFlush();
+    }
+  } catch {
+    scheduleVisitFlush(VISIT_FLUSH_DELAY * 3);
+  }
+}
+
+function recordVisit() {
+  const cachedTotal = readCache(localStorage, VISIT_TOTAL_KEY, VISIT_TOTAL_TTL);
+  if (Number.isSafeInteger(cachedTotal) && cachedTotal >= 0) state.visitCount = cachedTotal;
   showVisitCount();
+  try {
+    localStorage.setItem(VISIT_PENDING_KEY, String(readPendingVisits() + 1));
+  } catch {
+    void api('/api/visits', { method: 'POST', body: { visitId: makeVisitId(), count: 1 } }).catch(() => {});
+    return;
+  }
+  scheduleVisitFlush();
+}
+
+async function refreshVisitCount({ force = false } = {}) {
+  const cached = readCache(localStorage, VISIT_TOTAL_KEY, VISIT_TOTAL_TTL);
+  if (!force && Number.isSafeInteger(cached) && cached >= 0) {
+    state.visitCount = cached;
+    showVisitCount();
+    return;
+  }
+  try {
+    const data = await api('/api/visits');
+    const total = Number(data.total);
+    if (!Number.isSafeInteger(total) || total < 0) return;
+    state.visitCount = total;
+    writeCache(localStorage, VISIT_TOTAL_KEY, total);
+    showVisitCount();
+  } catch { /* the counter is decorative and must never block the page */ }
 }
 
 function renderBlocks(container, blocks = [], { anchors = false } = {}) {
@@ -652,15 +865,19 @@ async function reviewPage() {
 function renderReviewDetail(item) {
   const detail = document.querySelector('#review-detail');
   detail.innerHTML = `<div class="review-body"><div class="meta"><span class="tag">${esc(item.content_type)}</span><span>${esc(item.section_title)}</span><span>${esc(item.student_id)}</span></div><h2 style="font-family:var(--serif)">${esc(item.title)}</h2><p class="muted">${esc(item.summary)}</p><div class="prose" id="review-prose"></div></div>
-    <form class="review-actions" id="review-form"><label>给投稿者的说明<textarea name="note" maxlength="1000" placeholder="通过时可选；退回修改或拒绝时必填"></textarea></label><div class="form-error"></div><div class="form-actions"><button type="button" class="button danger" data-action="reject">不采用</button><button type="button" class="button" data-action="request_changes">退回修改</button><button type="button" class="button primary" data-action="approve">通过并发布</button></div></form>`;
+    <form class="review-actions" id="review-form"><label>给投稿者的说明<textarea name="note" maxlength="1000" placeholder="通过时可选；退回修改或拒绝时必填"></textarea></label><div class="form-error"></div>${state.user?.role === 'admin' ? '<button type="button" class="button review-edit-button" data-edit-pending>编辑待审核稿件</button>' : ''}<div class="form-actions"><button type="button" class="button danger" data-action="reject">不采用</button><button type="button" class="button" data-action="request_changes">退回修改</button><button type="button" class="button primary" data-action="approve">通过并发布</button></div></form>`;
   renderBlocks(document.querySelector('#review-prose'), item.body);
+  detail.querySelector('[data-edit-pending]')?.addEventListener('click', () => {
+    state.reviewEditing = item;
+    location.hash = `#/admin-review-edit/${encodeURIComponent(item.id)}`;
+  });
   detail.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async () => {
     const note = detail.querySelector('textarea').value;
     try {
       await api(`/api/review/${item.id}`, { method: 'POST', body: { action: button.dataset.action, note } });
       toast(button.dataset.action === 'approve' ? '内容已发布' : '审核结果已保存');
       reviewPage();
-      const fresh = await api(`/api/bootstrap?refresh=${Date.now()}`); state.sections = fresh.sections; state.articles = fresh.articles; state.teacherAdditions = fresh.teacherAdditions || [];
+      await refreshBootstrap();
     } catch (err) { detail.querySelector('.form-error').textContent = err.message; }
   }));
 }
@@ -674,8 +891,7 @@ function renderTeacherReviewDetail(item) {
     try {
       await api(`/api/review/teachers/${encodeURIComponent(item.id)}`, { method: 'POST', body: { action: button.dataset.teacherAction, note } });
       toast(button.dataset.teacherAction === 'approve' ? '教师已加入索引' : '审核结果已保存');
-      const fresh = await api(`/api/bootstrap?refresh=${Date.now()}`);
-      state.sections = fresh.sections; state.articles = fresh.articles; state.contributors = fresh.contributors || []; state.teacherAdditions = fresh.teacherAdditions || [];
+      await refreshBootstrap();
       reviewPage();
     } catch (err) { detail.querySelector('.form-error').textContent = err.message; }
   }));
@@ -711,14 +927,14 @@ function date(value) { return formatDate(value); }
 async function redeemAccess() {
   const code = prompt('请输入审核或管理员权限口令。口令只会发送到服务端验证：');
   if (!code) return;
-  try { const { user } = await api('/api/auth/access', { method: 'POST', body: { code } }); state.user = user; toast(`已获得${roleName(user.role)}权限`); render(); }
+  try { const { user } = await api('/api/auth/access', { method: 'POST', body: { code } }); state.user = user; cacheSession(user); toast(`已获得${roleName(user.role)}权限`); render(); }
   catch (err) { toast(err.message); }
 }
 
 async function logout() {
   if (state.user) clearUserLocalDrafts(state.user.studentId);
   state.activeDraftManager?.destroy();
-  await api('/api/auth/logout', { method: 'POST' }); state.user = null; toast('已退出登入'); location.hash = '#/'; render();
+  await api('/api/auth/logout', { method: 'POST' }); state.user = null; clearCache(sessionStorage, SESSION_CACHE_KEY); toast('已退出登入'); location.hash = '#/'; render();
 }
 
 loginDialog.querySelector('#login-form').addEventListener('submit', async event => {
@@ -726,13 +942,14 @@ loginDialog.querySelector('#login-form').addEventListener('submit', async event 
   const form = event.currentTarget; const errorElement = form.querySelector('[data-login-error]');
   try {
     const { user } = await api('/api/auth/login', { method: 'POST', body: { studentId: new FormData(form).get('studentId') } });
-    state.user = user; loginDialog.close(); form.reset(); toast('登入成功'); render();
+    state.user = user; cacheSession(user); loginDialog.close(); form.reset(); toast('登入成功'); render();
   } catch (err) { errorElement.textContent = err.message; }
 });
 
 async function render() {
   const current = route();
-  if (!['contribute', 'admin-article-edit'].includes(current.page) && state.activeDraftManager) {
+  if (['teachers', 'teacher', 'search'].includes(current.page)) await ensureTeachers();
+  if (!['contribute', 'admin-article-edit', 'admin-review-edit'].includes(current.page) && state.activeDraftManager) {
     state.activeDraftManager.destroy();
     state.activeDraftManager = null;
     state.activeEditor = null;
@@ -741,15 +958,15 @@ async function render() {
   if (current.page === 'mine') return minePage();
   if (current.page === 'review') return reviewPage();
   if (current.page === 'admin') return adminPage();
-  if (['contribute', 'admin-article-edit'].includes(current.page)) return contributePage();
+  if (['contribute', 'admin-article-edit', 'admin-review-edit'].includes(current.page)) return contributePage();
   const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, search: searchPage };
   shell((pages[current.page] || notFound)());
 }
 
 async function init() {
   try {
-    const [bootstrap, session] = await Promise.all([api('/api/bootstrap'), api('/api/session')]);
-    state.sections = bootstrap.sections; state.articles = bootstrap.articles; state.contributors = bootstrap.contributors || []; state.teacherAdditions = bootstrap.teacherAdditions || []; state.user = session.user;
+    const [bootstrap, session] = await Promise.all([loadBootstrap(), loadSession()]);
+    applyBootstrap(bootstrap); state.user = session.user;
     window.addEventListener('hashchange', render); render();
     void recordVisit();
   } catch (err) { app.innerHTML = errorView(`初始化失败：${err.message}`, true); }

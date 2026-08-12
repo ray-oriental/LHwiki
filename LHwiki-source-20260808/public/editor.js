@@ -54,7 +54,8 @@ function caretOffset(element) {
   return range.toString().length;
 }
 
-function setCaret(element, offset = 0) {
+export function setCaret(element, offset = 0, viewport = null) {
+  if (!element) return;
   const node = element.firstChild || element.appendChild(document.createTextNode(''));
   const range = document.createRange();
   range.setStart(node, Math.min(offset, node.textContent.length));
@@ -62,7 +63,10 @@ function setCaret(element, offset = 0) {
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
-  element.focus();
+  try { element.focus({ preventScroll: true }); } catch { element.focus(); }
+  if (viewport && (window.scrollX !== viewport.x || window.scrollY !== viewport.y)) {
+    window.scrollTo(viewport.x, viewport.y);
+  }
 }
 
 export class BlockEditor {
@@ -145,8 +149,7 @@ export class BlockEditor {
     const index = this.currentIndex();
     const offset = caretOffset(this.element(this.activeId));
     this.blocks[index].type = type;
-    this.render();
-    setCaret(this.element(this.activeId), offset);
+    this.renderAndFocus(this.activeId, offset);
     this.changed();
     this.emitSelection();
   }
@@ -156,6 +159,12 @@ export class BlockEditor {
     for (const block of this.blocks) fragment.append(this.renderBlock(block));
     this.root.querySelectorAll('.editor-block').forEach(element => element.remove());
     this.root.insertBefore(fragment, this.menu);
+  }
+
+  renderAndFocus(id, offset = 0) {
+    const viewport = { x: window.scrollX, y: window.scrollY };
+    this.render();
+    setCaret(this.element(id), offset, viewport);
   }
 
   renderBlock(block) {
@@ -193,8 +202,7 @@ export class BlockEditor {
     if (type) {
       block.text = '';
       block.type = type;
-      this.render();
-      setCaret(this.element(block.id), 0);
+      this.renderAndFocus(block.id, 0);
       this.emitSelection();
     }
     if (block.text === '/') this.showSlashMenu(input);
@@ -223,8 +231,7 @@ export class BlockEditor {
       const [first, second] = splitBlock(block, offset);
       this.blocks.splice(index, 1, first, second);
       this.activeId = second.id;
-      this.render();
-      setCaret(this.element(second.id), 0);
+      this.renderAndFocus(second.id, 0);
       this.changed();
       return;
     }
@@ -240,8 +247,7 @@ export class BlockEditor {
         const previousLength = previous.text.length;
         this.blocks.splice(index - 1, 2, mergeBlocks(previous, block));
         this.activeId = previous.id;
-        this.render();
-        setCaret(this.element(previous.id), previousLength);
+        this.renderAndFocus(previous.id, previousLength);
         this.changed();
       }
       return;
@@ -250,8 +256,7 @@ export class BlockEditor {
       event.preventDefault();
       const next = this.blocks[index + 1];
       this.blocks.splice(index, 2, mergeBlocks(block, next));
-      this.render();
-      setCaret(this.element(block.id), offset);
+      this.renderAndFocus(block.id, offset);
       this.changed();
     }
   }
@@ -269,8 +274,7 @@ export class BlockEditor {
     const after = block.text.slice(offset);
     if (lines.length === 1) {
       block.text = `${before}${lines[0]}${after}`.slice(0, 8000);
-      this.render();
-      setCaret(this.element(block.id), Math.min(before.length + lines[0].length, block.text.length));
+      this.renderAndFocus(block.id, Math.min(before.length + lines[0].length, block.text.length));
     } else {
       block.text = `${before}${lines.shift()}`.slice(0, 8000);
       const inserted = lines.map((line, lineIndex) => ({
@@ -281,8 +285,7 @@ export class BlockEditor {
       this.blocks.splice(index + 1, 0, ...inserted);
       const last = inserted.at(-1) || block;
       this.activeId = last.id;
-      this.render();
-      setCaret(this.element(last.id), Math.max(0, last.text.length - after.length));
+      this.renderAndFocus(last.id, Math.max(0, last.text.length - after.length));
     }
     this.changed();
   }

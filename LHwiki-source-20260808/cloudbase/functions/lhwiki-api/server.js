@@ -18,6 +18,7 @@ const {
 
 const COOKIE = 'campus_session';
 const VISIT_TRACKING_START = Date.parse('2026-08-10T00:00:00+08:00');
+const PUBLIC_CACHE_TTL = 2 * 60_000;
 const encoder = new TextEncoder();
 const migrationPath = join(__dirname, 'migration-data.private.json');
 const seed = JSON.parse(readFileSync(existsSync(migrationPath) ? migrationPath : join(__dirname, 'seed-data.json'), 'utf8'));
@@ -37,6 +38,7 @@ const {
   apiKey: process.env.CLOUDBASE_APIKEY
 });
 let seedPromise;
+let publicCache = null;
 const mutationWindows = new Map();
 
 function now() {
@@ -47,6 +49,34 @@ function withoutId(document) {
   if (!document) return null;
   const { _id, ...clean } = document;
   return clean;
+}
+
+function invalidatePublicCache() {
+  publicCache = null;
+}
+
+async function readPublicBootstrap() {
+  if (publicCache && Date.now() - publicCache.savedAt < PUBLIC_CACHE_TTL) return publicCache.value;
+  const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+    queryDocuments('sections'),
+    queryDocuments('articles'),
+    queryDocuments('contributors'),
+    queryDocuments('teacher_additions')
+  ]);
+  sections.sort((a, b) => a.sort_order - b.sort_order);
+  sortByDate(articles, 'published_at');
+  const publicContributors = contributors
+    .filter(item => item.approved_at)
+    .sort((a, b) => String(a.approved_at).localeCompare(String(b.approved_at)))
+    .map(item => ({ displayName: item.display_name, since: item.approved_at }));
+  const value = {
+    sections: sections.map(withoutId),
+    articles: articles.map(mapArticleSummary),
+    contributors: publicContributors,
+    teacherAdditions: teacherAdditions.map(mapTeacherAddition)
+  };
+  publicCache = { savedAt: Date.now(), value };
+  return value;
 }
 
 async function ensureSeed() {
@@ -124,7 +154,15 @@ async function readSession(request) {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!validLoginId(data.studentId) || data.exp < Date.now()) return null;
     const stored = withoutId(await getDocument('users', data.studentId));
-    if (data.studentId !== ADMIN_LOGIN_ID) return stored;
+    if (data.studentId !== ADMIN_LOGIN_ID) {
+      return stored || {
+        student_id: data.studentId,
+        role: 'student',
+        role_locked: 0,
+        created_at: now(),
+        last_login_at: now()
+      };
+    }
     const timestamp = now();
     const protectedAdmin = {
       ...stored,
@@ -149,7 +187,10 @@ function sessionCookie(value, maxAge = 604800) {
 
 function checkMutationOrigin(request) {
   const origin = request.headers.origin;
-  if (!origin) return true;
+  // Browser mutations always carry Origin. Reject origin-less scripts before
+  // they reach authentication or PostgreSQL, so direct scanners cannot turn
+  // login enumeration into database reads/writes.
+  if (!origin) return false;
   try {
     const originUrl = new URL(origin);
     const forwardedHost = (request.headers['x-forwarded-host'] || '').split(',')[0].trim();
@@ -184,9 +225,28 @@ function publicUser(user) {
   } : null;
 }
 
+async function ensurePersistentUser(user) {
+  const existing = withoutId(await getDocument('users', user.student_id));
+  if (existing) return existing;
+  const timestamp = now();
+  const persistent = {
+    ...user,
+    created_at: user.created_at || timestamp,
+    last_login_at: user.last_login_at || timestamp
+  };
+  await setDocument('users', user.student_id, persistent);
+  return persistent;
+}
+
 function mapArticle(row) {
   const clean = withoutId(row);
   return { ...clean, body: parseDocument(clean.body_json), body_json: undefined };
+}
+
+function mapArticleSummary(row) {
+  const clean = withoutId(row);
+  const { body_json, ...summary } = clean;
+  return summary;
 }
 
 function mapTeacherSubmission(row) {
@@ -271,6 +331,16 @@ function draftSubmissionInput(draft) {
   };
 }
 
+function canEditSubmission(user, submission) {
+  return Boolean(submission && (submission.student_id === user.student_id || user.role === 'admin'));
+}
+
+async function recordAdminSubmissionEdit(user, submission) {
+  if (user.role !== 'admin' || submission.student_id === user.student_id) return;
+  const eventId = crypto.randomUUID();
+  await setDocument('review_events', eventId, { id: eventId, submission_id: submission.id, reviewer_id: user.student_id, action: 'admin_edit', note: '管理员编辑待审核稿件', created_at: now() });
+}
+
 async function validateDraftTarget(user, targetType, targetId, requestedDraftKey = '') {
   if (targetType === 'new') {
     if (targetId) return { error: '新投稿草稿不能指定目标' };
@@ -281,7 +351,7 @@ async function validateDraftTarget(user, targetType, targetId, requestedDraftKey
   }
   if (targetType === 'submission') {
     const submission = withoutId(await getDocument('submissions', targetId));
-    if (!submission || submission.student_id !== user.student_id) return { error: '没有找到这份投稿', status: 404 };
+    if (!canEditSubmission(user, submission)) return { error: '没有找到这份投稿', status: 404 };
     if (!['pending', 'changes_requested'].includes(submission.status)) return { error: '当前投稿状态不能修改', status: 409 };
     return { draftKey: `submission:${targetId}`, targetId };
   }
@@ -370,34 +440,26 @@ async function route(request) {
   }
 
   if (method === 'POST' && path === '/api/visits') {
-    const limited = enforceMutationRate(request, 'visit', 600);
+    const limited = enforceMutationRate(request, 'visit', 120)
+      || enforceMutationRate(request, 'visit-sustained', 600, 15 * 60_000);
     if (limited) return limited;
     if (Date.now() < VISIT_TRACKING_START) {
       return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10', counted: false });
     }
-    const visitId = normalizeText((await readJson(request))?.visitId, 96);
+    const data = await readJson(request);
+    const visitId = normalizeText(data?.visitId, 96);
+    const visitCount = Number(data?.count ?? 1);
     if (!/^[A-Za-z0-9_-]{16,96}$/.test(visitId)) return error('访问标识无效');
-    await setDocument('site_visit_events', visitId, { visit_id: visitId, created_at: now() });
-    return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10', counted: true });
+    if (!Number.isSafeInteger(visitCount) || visitCount < 1 || visitCount > 20) return error('访问次数无效');
+    await setDocument('site_visit_events', visitId, { visit_id: visitId, visit_count: visitCount, created_at: now() });
+    return result({ trackingStartedAt: '2026-08-10', counted: true });
   }
 
   if (method === 'GET' && path === '/api/bootstrap') {
-    const [sections, articles, contributors, teacherAdditions] = await Promise.all([
-      queryDocuments('sections'),
-      queryDocuments('articles'),
-      queryDocuments('contributors'),
-      queryDocuments('teacher_additions')
-    ]);
-    sections.sort((a, b) => a.sort_order - b.sort_order);
-    sortByDate(articles, 'published_at');
-    const publicContributors = contributors
-      .filter(item => item.approved_at)
-      .sort((a, b) => String(a.approved_at).localeCompare(String(b.approved_at)))
-      .map(item => ({ displayName: item.display_name, since: item.approved_at }));
     return result(
-      { sections: sections.map(withoutId), articles: articles.map(withoutId), contributors: publicContributors, teacherAdditions: teacherAdditions.map(mapTeacherAddition) },
+      await readPublicBootstrap(),
       200,
-      { 'cache-control': 'public, max-age=60, stale-while-revalidate=300' }
+      { 'cache-control': 'public, max-age=300, stale-while-revalidate=3600' }
     );
   }
 
@@ -414,8 +476,10 @@ async function route(request) {
   }
 
   if (method === 'POST' && path === '/api/auth/login') {
-    const limited = enforceMutationRate(request, 'login', 30);
+    const limited = enforceMutationRate(request, 'login', 20);
     if (limited) return limited;
+    const sustainedLimit = enforceMutationRate(request, 'login-sustained', 60, 15 * 60_000);
+    if (sustainedLimit) return sustainedLimit;
     const data = await readJson(request);
     const studentId = normalizeText(data?.studentId, 32);
     if (!validLoginId(studentId)) return error('抱歉，仅限本校学生编辑', 403);
@@ -424,7 +488,11 @@ async function route(request) {
     const user = studentId === ADMIN_LOGIN_ID
       ? { ...existing, student_id: studentId, role: 'admin', role_locked: 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp }
       : { student_id: studentId, role: existing?.role || 'student', role_locked: existing?.role_locked || 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp };
-    await setDocument('users', studentId, user);
+    // Ordinary student sessions are stateless: a guessed-but-valid student ID must not
+    // amplify a login scan into a persistent database write. Privileged roles remain
+    // discoverable through their existing user row, while the protected administrator
+    // is still repaired and persisted on every login.
+    if (studentId === ADMIN_LOGIN_ID) await setDocument('users', studentId, user);
     const session = await makeSession(studentId, process.env.SESSION_SECRET);
     return result({ user: publicUser(user) }, 200, { 'set-cookie': sessionCookie(session) });
   }
@@ -446,7 +514,13 @@ async function route(request) {
     if (process.env.ADMIN_BOOTSTRAP_CODE && code === process.env.ADMIN_BOOTSTRAP_CODE) role = 'admin';
     else if (process.env.REVIEWER_ACCESS_CODE && code === process.env.REVIEWER_ACCESS_CODE) role = 'reviewer';
     if (!role) return error('权限口令不正确', 403);
-    const updated = { ...auth.user, role };
+    const timestamp = now();
+    const updated = {
+      ...auth.user,
+      role,
+      created_at: auth.user.created_at || timestamp,
+      last_login_at: timestamp
+    };
     await setDocument('users', auth.user.student_id, updated);
     return result({ user: publicUser(updated) });
   }
@@ -478,6 +552,7 @@ async function route(request) {
     if (existing) return result({ draft: mapDraft(existing) });
     const prepared = normalizeDraftSnapshot(data?.snapshot || {});
     if (prepared.error) return error(prepared.error);
+    auth.user = await ensurePersistentUser(auth.user);
     const id = crypto.randomUUID();
     const timestamp = now();
     let created;
@@ -566,16 +641,18 @@ async function route(request) {
       }
     } else if (draft.target_type === 'submission') {
       const submission = withoutId(await getDocument('submissions', draft.target_id));
-      if (!submission || submission.student_id !== auth.user.student_id) return error('没有找到这份投稿', 404);
+      if (!canEditSubmission(auth.user, submission)) return error('没有找到这份投稿', 404);
       if (!['pending', 'changes_requested'].includes(submission.status)) return error('当前投稿状态不能修改', 409);
-      await rememberNamedContributor(auth.user.student_id, author_label);
+      await rememberNamedContributor(submission.student_id, author_label);
       await setDocument('submissions', submission.id, { ...submission, section_slug, title, summary, body_json, content_type, subject, author_label, status: 'pending', review_note: '', updated_at: timestamp });
+      await recordAdminSubmissionEdit(auth.user, submission);
     } else if (draft.target_type === 'article') {
       if (auth.user.role !== 'admin') return error('需要管理员权限', 403);
       const article = withoutId(await getDocument('articles', draft.target_id));
       if (!article) return error('没有找到这篇已发布内容', 404);
       slug = article.slug;
       await setDocument('articles', article.slug, { ...article, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: timestamp });
+      invalidatePublicCache();
     } else {
       return error('草稿目标无效');
     }
@@ -615,6 +692,7 @@ async function route(request) {
     if ((await queryDocuments('teacher_additions', { name }, 1)).length) return error('教师索引中已经有这位老师', 409);
     if ((await queryDocuments('teacher_submissions', { name, status: 'pending' }, 1)).length) return error('这位老师的补充资料正在审核中', 409);
     const recent = await queryDocuments('teacher_submissions', { student_id: auth.user.student_id }, 100);
+    auth.user = await ensurePersistentUser(auth.user);
     if (recent.filter(item => Date.now() - Date.parse(item.created_at) < 86400_000).length >= 5) return error('每天最多提交 5 位教师，请稍后再试', 429);
     const id = crypto.randomUUID();
     const timestamp = now();
@@ -643,6 +721,7 @@ async function route(request) {
     const prepared = await validateSubmission(await readJson(request));
     if (prepared.error) return error(prepared.error);
     const recent = await queryDocuments('submissions', { student_id: auth.user.student_id });
+    auth.user = await ensurePersistentUser(auth.user);
     if (recent.filter(item => Date.now() - Date.parse(item.created_at) < 86400_000).length >= 10) return error('每天最多提交 10 次，请稍后再试', 429);
     const id = crypto.randomUUID();
     const timestamp = now();
@@ -659,13 +738,14 @@ async function route(request) {
     const auth = await requireUser(request);
     if (auth.response) return auth.response;
     const existing = withoutId(await getDocument('submissions', editMatch[1]));
-    if (!existing || existing.student_id !== auth.user.student_id) return error('没有找到这份投稿', 404);
+    if (!canEditSubmission(auth.user, existing)) return error('没有找到这份投稿', 404);
     if (!['pending', 'changes_requested'].includes(existing.status)) return error('当前状态不能修改', 409);
     const prepared = await validateSubmission(await readJson(request));
     if (prepared.error) return error(prepared.error);
     const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
-    await rememberNamedContributor(auth.user.student_id, author_label);
+    await rememberNamedContributor(existing.student_id, author_label);
     await setDocument('submissions', editMatch[1], { ...existing, section_slug, title, summary, body_json, content_type, subject, author_label, status: 'pending', review_note: '', updated_at: now() });
+    await recordAdminSubmissionEdit(auth.user, existing);
     return result({ ok: true, status: 'pending' });
   }
 
@@ -720,6 +800,7 @@ async function route(request) {
           approved_at: timestamp
         });
       }
+      invalidatePublicCache();
     }
     const status = action === 'approve' ? 'approved' : 'rejected';
     await setDocument('teacher_submissions', submission.id, {
@@ -761,6 +842,7 @@ async function route(request) {
     const eventId = crypto.randomUUID();
     await setDocument('review_events', eventId, { id: eventId, submission_id: submission.id, reviewer_id: auth.user.student_id, action, note, created_at: now() });
     await setDocument('submissions', submission.id, { ...submission, status: statuses[action], review_note: note, updated_at: now() });
+    if (action === 'approve') invalidatePublicCache();
     return result({ ok: true, status: statuses[action], slug });
   }
 
@@ -775,6 +857,7 @@ async function route(request) {
     if (!existing) return error('没有找到这篇已发布内容', 404);
     if (method === 'DELETE') {
       await deleteDocument('articles', slug);
+      invalidatePublicCache();
       return result({ ok: true, slug });
     }
     const prepared = await validateSubmission(await readJson(request));
@@ -782,6 +865,7 @@ async function route(request) {
     const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
     const updated = { ...existing, slug, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: now() };
     await setDocument('articles', slug, updated);
+    invalidatePublicCache();
     return result({ ok: true, article: mapArticle(updated) });
   }
 

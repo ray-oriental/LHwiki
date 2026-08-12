@@ -205,6 +205,11 @@ textarea { min-height: 92px; resize: vertical; }
 .writing-stats div { padding: 8px 0; }
 .writing-stats dt { color: var(--muted); font-size: 11px; }
 .writing-stats dd { margin: 0; font: 700 20px var(--serif); }
+.draft-danger { display: grid; gap: 4px; margin-top: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.draft-danger small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.review-edit-button { width: 100%; border-color: var(--brick); color: var(--brick); background: var(--surface); }
+.button.danger-quiet { border-color: #d8b7b1; color: var(--red); background: transparent; }
+.button.danger-quiet:hover, .button.danger-quiet:focus-visible { border-color: var(--red); background: #fff6f4; }
 .conflict-panel { padding: 14px; border: 1px solid #e2b9b2; background: #fff6f4; }
 .conflict-panel[hidden] { display: none; }
 .conflict-panel p { margin: 5px 0 10px; color: var(--muted); font-size: 12px; }
