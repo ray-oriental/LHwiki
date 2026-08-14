@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mergeBlocks, normalizeBlocks, setCaret, splitBlock } from '../public/editor.js';
+import { blocksToMarkdown, mergeBlocks, normalizeBlocks, parseMarkdown, setCaret, splitBlock } from '../public/editor.js';
 import { DraftManager, draftKeyFor } from '../public/draft-manager.js';
 
 test('editor normalizes legacy blocks and preserves structured headings', () => {
@@ -22,6 +22,41 @@ test('split and merge preserve every character', () => {
   assert.equal(second.text, '后半');
   assert.equal(second.type, 'paragraph');
   assert.equal(mergeBlocks(first, second).text, original.text);
+});
+
+test('markdown imports every supported block style and exports without losing meaning', () => {
+  const source = `# 小标题
+
+普通段落含 **粗体**、*斜体*、~~删除线~~、\`代码\` 和 [链接](https://luhe.net/)。
+
+> 引用
+
+- 项目
+1. 编号
+- [ ] 待办
+- [x] 完成
+> [!NOTE] 提示
+
+---
+
+\`\`\`js
+const school = 'Luhe';
+\`\`\``;
+  const blocks = parseMarkdown(source);
+  assert.deepEqual(blocks.map(block => block.type), ['heading', 'paragraph', 'quote', 'bullet', 'number', 'check', 'checked', 'callout', 'divider', 'code']);
+  assert.match(blocksToMarkdown(blocks), /- \[x\] 完成/);
+  assert.match(blocksToMarkdown(blocks), /```\nconst school/);
+});
+
+test('new structured styles survive editor normalization', () => {
+  const blocks = normalizeBlocks([
+    { type: 'check', text: '待办' },
+    { type: 'checked', text: '完成' },
+    { type: 'callout', text: '提示' },
+    { type: 'code', text: 'const x = 1;' },
+    { type: 'divider', text: '' }
+  ]);
+  assert.deepEqual(blocks.map(block => block.type), ['check', 'checked', 'callout', 'code', 'divider']);
 });
 
 test('draft keys distinguish new, submission and article targets', () => {

@@ -1,6 +1,7 @@
 import { formatDate } from './date.js';
-import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js?v=20260810-editor-stability';
+import { BlockEditor, INLINE_FORMATS, TYPE_LABELS, blocksToMarkdown, normalizeBlocks, parseMarkdown } from './editor.js?v=20260814-markdown-styles';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js?v=20260811-resource-budget';
+import { CHANGELOG } from './changelog.js?v=20260814';
 
 const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
@@ -20,6 +21,56 @@ const VISIT_FLUSH_DELAY = 20_000;
 const VISIT_BATCH_MAX = 20;
 let visitFlushTimer = null;
 let baseTeachers = null;
+let shellKeydownHandler = null;
+let shellViewportHandler = null;
+let revealObserver = null;
+const reactiveGlassElements = new WeakSet();
+
+const THEME_KEY = 'lhwiki:appearance';
+const SIDEBAR_KEY = 'lhwiki:sidebar-collapsed';
+const prefersDark = matchMedia('(prefers-color-scheme: dark)');
+const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const shellMobileLayout = matchMedia('(max-width: 950px)');
+
+function preferredTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch { /* storage can be unavailable */ }
+  return prefersDark.matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme = preferredTheme()) {
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0d1014' : '#f1f3f6');
+  const toggle = document.querySelector('#theme-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-label', theme === 'dark' ? '切换到浅色模式' : '切换到深色模式');
+    toggle.setAttribute('aria-pressed', String(theme === 'dark'));
+    toggle.textContent = theme === 'dark' ? '☀' : '◐';
+  }
+}
+
+function transitionTheme(theme) {
+  const reduceMotion = prefersReducedMotion.matches;
+  if (!reduceMotion && document.startViewTransition) {
+    document.startViewTransition(() => applyTheme(theme));
+    return;
+  }
+  applyTheme(theme);
+}
+
+function sidebarStartsCollapsed() {
+  try { return localStorage.getItem(SIDEBAR_KEY) === 'true'; }
+  catch { return false; }
+}
+
+applyTheme();
+prefersDark.addEventListener?.('change', () => {
+  try { if (localStorage.getItem(THEME_KEY)) return; } catch { /* follow system */ }
+  applyTheme();
+});
 
 async function ensureTeachers() {
   if (!baseTeachers) ({ TEACHERS: baseTeachers } = await import('./teachers.js?v=20260810-directory-supplement-2'));
@@ -138,7 +189,7 @@ function route() {
 }
 
 function navLink(href, icon, label, active) {
-  return `<a class="nav-link ${active ? 'active' : ''}" href="${href}"><span class="emoji">${icon}</span><span>${esc(label)}</span></a>`;
+  return `<a class="nav-link ${active ? 'active' : ''}" href="${href}" title="${esc(label)}"><span class="emoji">${icon}</span><span>${esc(label)}</span></a>`;
 }
 
 function shell(content) {
@@ -146,7 +197,7 @@ function shell(content) {
   const roleTools = state.user && ['reviewer', 'admin'].includes(state.user.role)
     ? navLink('#/review', '✓', '审核投稿', ['review', 'admin-review-edit'].includes(current.page)) : '';
   const adminTools = state.user?.role === 'admin' ? navLink('#/admin', '⚙', '权限管理', current.page === 'admin') : '';
-  app.innerHTML = `<div class="shell">
+  app.innerHTML = `<div class="shell${sidebarStartsCollapsed() ? ' sidebar-collapsed' : ''}">
     <aside class="sidebar" id="sidebar">
       <a class="brand" href="#/"><span class="brand-mark">LH</span><span><strong>LHwiki</strong><small>潞河学生经验档案</small></span></a>
       <div class="nav-label">浏览</div>
@@ -156,23 +207,32 @@ function shell(content) {
       <div class="nav-label">参与</div>
       ${navLink('#/contribute', '✎', '提交内容', current.page === 'contribute')}
       ${navLink('#/thanks', '名', '致谢', current.page === 'thanks')}
+      ${navLink('#/changelog', '记', '更新日志', current.page === 'changelog')}
       ${state.user ? navLink('#/mine', '◷', '我的投稿', current.page === 'mine') : ''}
       ${roleTools}${adminTools}
       <div class="side-footer"><p>把经验说具体，也给不同的经历留位置。</p><a href="#/about" class="button small">阅读共建说明</a></div>
     </aside>
+    <button class="sidebar-scrim" id="sidebar-scrim" aria-label="关闭目录" tabindex="-1"></button>
     <main class="main">
       <header class="topbar">
-        <button class="icon-button mobile-menu" id="mobile-menu" aria-label="打开目录">☰</button>
-        <label class="search"><span>⌕</span><input id="search" value="${esc(state.search)}" placeholder="搜索老师、课程、社团或经验" aria-label="搜索"></label>
+        <div class="topbar-leading">
+          <button class="icon-button mobile-menu" id="mobile-menu" aria-label="打开目录">☰</button>
+          <button class="icon-button sidebar-collapse" id="sidebar-collapse" type="button" aria-controls="sidebar" aria-label="收起目录" title="收起目录"><span class="sidebar-toggle-icon" aria-hidden="true"><i></i></span></button>
+          <label class="search"><span>⌕</span><input id="search" value="${esc(state.search)}" placeholder="搜索老师、课程、社团或经验" aria-label="搜索"></label>
+        </div>
         <div class="actions">
+          <button class="icon-button theme-toggle" id="theme-toggle" type="button" aria-label="切换到深色模式"></button>
           <a class="button primary" href="#/contribute"><span>＋</span><span class="contribute-label">提交内容</span></a>
           ${userControl()}
         </div>
       </header>
-      <div class="content">${content}</div>
+      <div class="content page-enter page-${esc(current.page)}">${content}</div>
     </main>
   </div>`;
+  applyTheme(document.documentElement.dataset.theme);
   bindShell();
+  initMotion();
+  initGlassResponse();
 }
 
 function userControl() {
@@ -188,10 +248,60 @@ function userControl() {
 function roleName(role) { return ({ student: '投稿者', reviewer: '审核者', admin: '管理员' })[role] || role; }
 
 function bindShell() {
-  document.querySelector('#mobile-menu')?.addEventListener('click', () => document.querySelector('#sidebar').classList.toggle('open'));
+  const shellElement = document.querySelector('.shell');
+  const sidebar = document.querySelector('#sidebar');
+  const scrim = document.querySelector('#sidebar-scrim');
+  const menuButton = document.querySelector('#mobile-menu');
+  const mobileLayout = shellMobileLayout;
+  const setSidebar = open => {
+    const expanded = Boolean(open && mobileLayout.matches);
+    sidebar?.classList.toggle('open', expanded);
+    scrim?.classList.toggle('open', expanded);
+    document.body.classList.toggle('menu-open', expanded);
+    menuButton?.setAttribute('aria-expanded', String(expanded));
+    if (sidebar) {
+      sidebar.inert = mobileLayout.matches && !expanded;
+      if (mobileLayout.matches) sidebar.setAttribute('aria-hidden', String(!expanded));
+      else sidebar.removeAttribute('aria-hidden');
+    }
+  };
+  menuButton?.setAttribute('aria-controls', 'sidebar');
+  menuButton?.setAttribute('aria-expanded', 'false');
+  menuButton?.addEventListener('click', () => setSidebar(!sidebar?.classList.contains('open')));
+  scrim?.addEventListener('click', () => { setSidebar(false); menuButton?.focus(); });
+  sidebar?.querySelectorAll('a').forEach(link => link.addEventListener('click', () => setSidebar(false)));
+  if (shellViewportHandler) mobileLayout.removeEventListener?.('change', shellViewportHandler);
+  shellViewportHandler = () => setSidebar(false);
+  mobileLayout.addEventListener?.('change', shellViewportHandler);
+  setSidebar(false);
+  if (shellKeydownHandler) document.removeEventListener('keydown', shellKeydownHandler);
+  shellKeydownHandler = event => {
+    if (event.key !== 'Escape' || !sidebar?.classList.contains('open')) return;
+    setSidebar(false);
+    menuButton?.focus();
+  };
+  document.addEventListener('keydown', shellKeydownHandler);
+  const collapseButton = document.querySelector('#sidebar-collapse');
+  const syncCollapseButton = () => {
+    const collapsed = shellElement?.classList.contains('sidebar-collapsed');
+    collapseButton?.setAttribute('aria-label', collapsed ? '展开目录' : '收起目录');
+    collapseButton?.setAttribute('title', collapsed ? '展开目录' : '收起目录');
+    collapseButton?.setAttribute('aria-expanded', String(!collapsed));
+  };
+  syncCollapseButton();
+  collapseButton?.addEventListener('click', () => {
+    const collapsed = shellElement.classList.toggle('sidebar-collapsed');
+    try { localStorage.setItem(SIDEBAR_KEY, String(collapsed)); } catch { /* preference remains session-only */ }
+    syncCollapseButton();
+  });
+  document.querySelector('#theme-toggle')?.addEventListener('click', () => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem(THEME_KEY, theme); } catch { /* theme still applies */ }
+    transitionTheme(theme);
+  });
   document.querySelectorAll('[data-login]').forEach(button => button.addEventListener('click', () => loginDialog.showModal()));
-  const menuButton = document.querySelector('#user-menu-button');
-  menuButton?.addEventListener('click', () => { const menu = document.querySelector('#user-menu'); menu.hidden = !menu.hidden; });
+  const userMenuButton = document.querySelector('#user-menu-button');
+  userMenuButton?.addEventListener('click', () => { const menu = document.querySelector('#user-menu'); menu.hidden = !menu.hidden; });
   document.querySelector('[data-logout]')?.addEventListener('click', logout);
   document.querySelector('[data-access]')?.addEventListener('click', redeemAccess);
   bindTeacherReviewButtons();
@@ -199,6 +309,83 @@ function bindShell() {
     state.search = event.target.value;
     if (route().page !== 'search') history.replaceState(null, '', '#/search');
     document.querySelector('.content').innerHTML = searchPage();
+  });
+}
+
+function initMotion() {
+  revealObserver?.disconnect();
+  const reduceMotion = prefersReducedMotion.matches;
+  const revealItems = document.querySelectorAll('.section-heading, .section-card, .article-row, .source-note, .teacher-card, .credit-section, .form-card, .panel');
+  revealItems.forEach((element, index) => {
+    element.classList.add('reveal-item');
+    element.style.setProperty('--reveal-delay', `${Math.min(index % 6, 5) * 45}ms`);
+  });
+  if (reduceMotion || !('IntersectionObserver' in window)) {
+    revealItems.forEach(element => element.classList.add('is-visible'));
+  } else {
+    revealObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('is-visible');
+        revealObserver.unobserve(entry.target);
+      });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
+    revealItems.forEach(element => revealObserver.observe(element));
+  }
+
+  const hero = document.querySelector('.hero');
+  if (hero) {
+    requestAnimationFrame(() => hero.classList.add('is-ready'));
+    if (!reduceMotion && matchMedia('(pointer: fine)').matches) {
+      let pointerFrame = null;
+      hero.addEventListener('pointermove', event => {
+        if (pointerFrame) cancelAnimationFrame(pointerFrame);
+        pointerFrame = requestAnimationFrame(() => {
+          const bounds = hero.getBoundingClientRect();
+          hero.style.setProperty('--hero-x', ((event.clientX - bounds.left) / bounds.width - 0.5).toFixed(3));
+          hero.style.setProperty('--hero-y', ((event.clientY - bounds.top) / bounds.height - 0.5).toFixed(3));
+        });
+      });
+      hero.addEventListener('pointerleave', () => {
+        hero.style.setProperty('--hero-x', 0);
+        hero.style.setProperty('--hero-y', 0);
+      });
+    }
+  }
+
+  if (!reduceMotion && matchMedia('(pointer: fine)').matches) {
+    document.querySelectorAll('.section-card').forEach(card => card.addEventListener('pointermove', event => {
+      const bounds = card.getBoundingClientRect();
+      card.style.setProperty('--spot-x', `${event.clientX - bounds.left}px`);
+      card.style.setProperty('--spot-y', `${event.clientY - bounds.top}px`);
+    }));
+  }
+}
+
+function initGlassResponse() {
+  if (prefersReducedMotion.matches || !matchMedia('(pointer: fine)').matches) return;
+  const surfaces = document.querySelectorAll('.sidebar, .topbar, .search, .hero-copy, .form-card, .panel, .writing-paper, .dialog, .preview-dialog');
+  surfaces.forEach(surface => {
+    if (reactiveGlassElements.has(surface)) return;
+    reactiveGlassElements.add(surface);
+    surface.classList.add('glass-reactive');
+    let pointerFrame = null;
+    surface.addEventListener('pointermove', event => {
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
+      pointerFrame = requestAnimationFrame(() => {
+        const bounds = surface.getBoundingClientRect();
+        surface.style.setProperty('--glass-x', `${event.clientX - bounds.left}px`);
+        surface.style.setProperty('--glass-y', `${event.clientY - bounds.top}px`);
+        const dark = document.documentElement.dataset.theme === 'dark';
+        surface.style.setProperty('--glass-light', dark ? 'rgb(196 225 244 / 18%)' : 'rgb(255 255 255 / 30%)');
+      });
+    });
+    surface.addEventListener('pointerleave', () => {
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
+      surface.style.setProperty('--glass-x', '50%');
+      surface.style.setProperty('--glass-y', '0px');
+      surface.style.setProperty('--glass-light', 'transparent');
+    });
   });
 }
 
@@ -220,10 +407,10 @@ function allTeachers() {
 }
 
 function home() {
-  return `<section class="hero"><div class="hero-copy"><span class="eyebrow">LUHE · WRITTEN BY STUDENTS</span>
+  return `<section class="hero"><div class="hero-media" role="img" aria-label="潞河中学校园建筑，图片来源：潞河中学官方网站"></div><div class="hero-copy"><span class="eyebrow">LUHE · WRITTEN BY STUDENTS</span>
     <h1>在潞园生活，<br>也把潞园写下来</h1>
     <p>这里收集那些“如果早一点知道就好了”的具体经验。不是标准答案，也不是匿名打分榜，而是一个个有背景、有细节、愿意对读者负责的讲述。</p>
-    <div class="hero-actions"><a href="#/section/start" class="button primary">从第一篇开始</a><a href="#/contribute" class="button ghost">写下你的版本</a></div></div><div class="hero-year">1867—NOW</div></section>
+    <div class="hero-actions"><a href="#/section/start" class="button primary">从第一篇开始</a><a href="#/contribute" class="button ghost">写下你的版本</a></div></div><div class="hero-year">1867-NOW</div></section>
     <div class="home-intro"><span>LHwiki / 潞河学生经验档案</span><p>官网告诉我们学校是什么样；这里更想回答，在其中度过一天、一学期、三年，究竟是什么感受。</p></div>
     <div class="section-heading"><div><h2>从哪里开始？</h2><p>按场景浏览，也可以直接搜索你关心的人和事。</p></div><a href="#/teachers" class="text-link">浏览教师索引 →</a></div>
     <div class="section-grid">${state.sections.map(sectionCard).join('')}</div>
@@ -384,6 +571,18 @@ function aboutPage() {
     <h2>审核原则</h2><p>审核只判断内容是否具体、清晰、尊重隐私并适合公开，不要求观点一致。面对相互矛盾的经历，我们更倾向于并列呈现并注明背景。</p></div>`;
 }
 
+function changelogPage() {
+  return `<header class="page-heading changelog-heading"><span class="eyebrow">VERSION HISTORY</span><h1>更新日志</h1><p>记录 LHwiki 从最小可用版本到现在的功能演进。</p></header>
+    <div class="changelog-list">${CHANGELOG.map((entry, index) => `<article class="changelog-entry${index === 0 ? ' latest' : ''}"><header><div><span class="version-mark">${esc(entry.version)}</span>${index === 0 ? '<span class="status approved">当前版本</span>' : ''}</div><time datetime="${esc(entry.date)}">${esc(entry.date)}</time></header><h2>${esc(entry.title)}</h2><ul>${entry.items.map(item => `<li>${esc(item)}</li>`).join('')}</ul></article>`).join('')}</div>`;
+}
+
+function editorToolbar() {
+  return `<div class="editor-toolbar" aria-label="文字样式工具栏">
+    <label class="editor-style-picker"><span>样式</span><select data-editor-style aria-label="段落样式">${Object.entries(TYPE_LABELS).map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
+    <div class="inline-tools" aria-label="行内格式">${Object.entries(INLINE_FORMATS).map(([format, option]) => `<button type="button" class="tool inline-tool inline-${format}" data-editor-inline="${format}" aria-label="${option.title}" title="${option.title}">${option.label}</button>`).join('')}<button type="button" class="tool" data-editor-link aria-label="添加链接" title="添加链接">链接</button><button type="button" class="tool markdown-tool" data-markdown-open>Markdown</button></div>
+  </div>`;
+}
+
 function snapshotFromSource(source = {}, preset = null) {
   const anonymous = source.anonymous === true || source.author_label === '匿名同学';
   return {
@@ -458,13 +657,14 @@ async function contributePage() {
           <label class="title-field"><span>标题</span><input name="title" maxlength="100" placeholder="给这段经历一个具体的标题" required></label>
           <label><span>一句话摘要</span><textarea name="summary" maxlength="240" placeholder="告诉读者背景、重点和适合谁阅读" required></textarea></label>
           <label><span>评价对象或访谈主题（选填）</span><input name="subject" maxlength="80" placeholder="例如：文学社 / 高三一轮复习"></label></div>
-          <div class="editor-chrome"><div class="editor-toolbar" aria-label="段落格式">${Object.entries(TYPE_LABELS).map(([type, label]) => `<button type="button" class="tool" data-editor-type="${type}">${label}</button>`).join('')}</div><span class="editor-hint">Enter 新段落 · Shift+Enter 换行 · 输入 / 选择格式</span></div>
+          <div class="editor-chrome">${editorToolbar()}<span class="editor-hint">Enter 新段落 · Shift+Enter 换行 · 输入 / 或导入 Markdown</span></div>
           <div id="block-editor" class="block-editor" aria-label="文章正文"></div>
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
         </section>
         <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>准备自动保存</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，自动保存已经暂停。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>清除本机与云端尚未提交的内容</small></div><p class="form-error" data-form-error></p></aside>
         <dialog class="preview-dialog" id="preview-dialog"><div class="preview-head"><strong>投稿预览</strong><button type="button" class="icon-button" data-close-preview aria-label="关闭预览">×</button></div><article class="prose" id="preview-prose"></article></dialog>
+        <dialog class="preview-dialog markdown-dialog" id="markdown-dialog"><div class="preview-head"><strong>Markdown 导入与导出</strong><button type="button" class="icon-button" data-close-markdown aria-label="关闭 Markdown 面板">×</button></div><p class="muted">支持标题、引用、列表、任务清单、提示框、分隔线、代码块，以及粗体、斜体、删除线、行内代码和安全链接。</p><label>Markdown 正文<textarea class="markdown-source" data-markdown-source spellcheck="false" aria-label="Markdown 正文"></textarea></label><div class="form-actions"><button type="button" class="button" data-markdown-refresh>从当前正文重新生成</button><button type="button" class="button primary" data-markdown-import>导入并替换正文</button></div></dialog>
       </form>`);
     bindEditorExperience(context, initial);
   } catch (err) {
@@ -550,7 +750,41 @@ function bindEditorExperience(context, initial) {
     syncByline();
     manager.update(collectSnapshot(form, editor));
   });
-  document.querySelectorAll('[data-editor-type]').forEach(button => button.addEventListener('click', () => editor.setCurrentType(button.dataset.editorType)));
+  const stylePicker = document.querySelector('[data-editor-style]');
+  stylePicker?.addEventListener('change', () => editor.setCurrentType(stylePicker.value));
+  document.querySelector('#block-editor')?.addEventListener('blockselectionchange', event => {
+    if (stylePicker && event.detail?.type && TYPE_LABELS[event.detail.type]) stylePicker.value = event.detail.type;
+  });
+  document.querySelectorAll('[data-editor-inline]').forEach(button => {
+    button.addEventListener('mousedown', event => event.preventDefault());
+    button.addEventListener('click', () => {
+      const option = INLINE_FORMATS[button.dataset.editorInline];
+      if (option) editor.applyInline(option.prefix, option.suffix);
+    });
+  });
+  const linkButton = document.querySelector('[data-editor-link]');
+  linkButton?.addEventListener('mousedown', event => event.preventDefault());
+  linkButton?.addEventListener('click', () => {
+    const href = prompt('输入以 https:// 或 http:// 开头的链接');
+    if (!href) return;
+    if (!/^https?:\/\/[^\s]+$/i.test(href)) { toast('链接格式不正确'); return; }
+    editor.applyInline('[', `](${href})`);
+  });
+  const markdownDialog = document.querySelector('#markdown-dialog');
+  const markdownSource = markdownDialog?.querySelector('[data-markdown-source]');
+  const refreshMarkdown = () => { if (markdownSource) markdownSource.value = blocksToMarkdown(editor.getBlocks()); };
+  document.querySelector('[data-markdown-open]')?.addEventListener('click', () => { refreshMarkdown(); markdownDialog?.showModal(); });
+  document.querySelector('[data-close-markdown]')?.addEventListener('click', () => markdownDialog?.close());
+  document.querySelector('[data-markdown-refresh]')?.addEventListener('click', refreshMarkdown);
+  document.querySelector('[data-markdown-import]')?.addEventListener('click', () => {
+    editor.setBlocks(parseMarkdown(markdownSource?.value || ''), { focus: true });
+    const importedStats = editor.stats();
+    document.querySelector('[data-character-count]').textContent = importedStats.characters;
+    document.querySelector('[data-block-count]').textContent = importedStats.blocks;
+    manager.update(collectSnapshot(form, editor));
+    markdownDialog?.close();
+    toast('Markdown 已导入');
+  });
   document.querySelector('[data-save-now]').addEventListener('click', () => manager.saveNow());
   document.querySelector('[data-delete-current-draft]').addEventListener('click', async event => {
     if (!confirm('确定删除这份草稿吗？所有尚未提交的内容都会被清除，且无法恢复。')) return;
@@ -756,20 +990,62 @@ async function refreshVisitCount({ force = false } = {}) {
   } catch { /* the counter is decorative and must never block the page */ }
 }
 
+function renderInlineMarkdown(container, text = '') {
+  const source = String(text);
+  const tokenPattern = /(\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/)[^)\s]+\)|\*[^*\n]+\*)/g;
+  let offset = 0;
+  for (const match of source.matchAll(tokenPattern)) {
+    if (match.index > offset) container.append(document.createTextNode(source.slice(offset, match.index)));
+    const token = match[0];
+    let element;
+    let value;
+    if ((token.startsWith('**') && token.endsWith('**')) || (token.startsWith('__') && token.endsWith('__'))) { element = document.createElement('strong'); value = token.slice(2, -2); }
+    else if (token.startsWith('~~')) { element = document.createElement('del'); value = token.slice(2, -2); }
+    else if (token.startsWith('`')) { element = document.createElement('code'); value = token.slice(1, -1); }
+    else if (token.startsWith('[')) {
+      const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      element = document.createElement('a'); value = link[1]; element.href = link[2]; element.target = '_blank'; element.rel = 'noreferrer noopener';
+    } else { element = document.createElement('em'); value = token.slice(1, -1); }
+    element.textContent = value;
+    container.append(element);
+    offset = match.index + token.length;
+  }
+  if (offset < source.length) container.append(document.createTextNode(source.slice(offset)));
+}
+
 function renderBlocks(container, blocks = [], { anchors = false } = {}) {
   let currentList = null;
   const headings = [];
   const usedIds = new Set();
   let headingIndex = 0;
   for (const block of blocks) {
-    if (block.type === 'bullet' || block.type === 'number') {
-      const tag = block.type === 'bullet' ? 'UL' : 'OL';
-      if (!currentList || currentList.tagName !== tag) { currentList = document.createElement(tag); container.append(currentList); }
-      const item = document.createElement('li'); item.textContent = block.text; currentList.append(item); continue;
+    if (['bullet', 'number', 'check', 'checked'].includes(block.type)) {
+      const tag = block.type === 'number' ? 'OL' : 'UL';
+      const listKind = ['check', 'checked'].includes(block.type) ? 'task' : block.type;
+      if (!currentList || currentList.tagName !== tag || currentList.dataset.kind !== listKind) {
+        currentList = document.createElement(tag);
+        currentList.dataset.kind = listKind;
+        if (listKind === 'task') currentList.className = 'task-list';
+        container.append(currentList);
+      }
+      const item = document.createElement('li');
+      if (listKind === 'task') {
+        const marker = document.createElement('span'); marker.className = 'task-marker'; marker.setAttribute('aria-hidden', 'true'); marker.textContent = block.type === 'checked' ? '✓' : '';
+        if (block.type === 'checked') item.className = 'is-checked';
+        item.append(marker);
+      }
+      renderInlineMarkdown(item, block.text);
+      currentList.append(item);
+      continue;
     }
     currentList = null;
-    const element = document.createElement(block.type === 'heading' ? 'h2' : block.type === 'subheading' ? 'h3' : block.type === 'quote' ? 'blockquote' : 'p');
-    element.textContent = block.text;
+    if (block.type === 'divider') { container.append(document.createElement('hr')); continue; }
+    if (block.type === 'code') {
+      const pre = document.createElement('pre'); const code = document.createElement('code'); code.textContent = block.text; pre.append(code); container.append(pre); continue;
+    }
+    const element = document.createElement(block.type === 'heading' ? 'h2' : block.type === 'subheading' ? 'h3' : block.type === 'quote' ? 'blockquote' : block.type === 'callout' ? 'aside' : 'p');
+    if (block.type === 'callout') element.className = 'prose-callout';
+    renderInlineMarkdown(element, block.text);
     if (anchors && ['heading', 'subheading'].includes(block.type)) {
       headingIndex += 1;
       const base = /^[A-Za-z0-9_-]{6,64}$/.test(block.id || '') ? `section-${block.id}` : `section-${headingIndex}`;
@@ -945,6 +1221,7 @@ loginDialog.querySelector('#login-form').addEventListener('submit', async event 
     state.user = user; cacheSession(user); loginDialog.close(); form.reset(); toast('登入成功'); render();
   } catch (err) { errorElement.textContent = err.message; }
 });
+loginDialog.querySelector('.dialog-close')?.addEventListener('click', () => loginDialog.close());
 
 async function render() {
   const current = route();
@@ -959,7 +1236,7 @@ async function render() {
   if (current.page === 'review') return reviewPage();
   if (current.page === 'admin') return adminPage();
   if (['contribute', 'admin-article-edit', 'admin-review-edit'].includes(current.page)) return contributePage();
-  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, search: searchPage };
+  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, changelog: changelogPage, about: aboutPage, search: searchPage };
   shell((pages[current.page] || notFound)());
 }
 

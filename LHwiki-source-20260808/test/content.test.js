@@ -27,3 +27,15 @@ test('document parser accepts only safe structured blocks', () => {
   assert.equal(parseDocument([{ type: 'html', text: '<script>x</script>' }]), null);
   assert.equal(parseDocument('not json'), null);
 });
+
+test('server accepts the expanded safe block set without accepting html', () => {
+  const document = parseDocument([
+    { type: 'check', text: '待办' },
+    { type: 'checked', text: '完成' },
+    { type: 'callout', text: '提示' },
+    { type: 'code', text: '<script>只是代码文本</script>' },
+    { type: 'divider', text: ' ' }
+  ]);
+  assert.deepEqual(document.map(block => block.type), ['check', 'checked', 'callout', 'code', 'divider']);
+  assert.equal(parseDocument([{ type: 'html', text: '<strong>不允许</strong>' }]), null);
+});

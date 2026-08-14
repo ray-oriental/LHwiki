@@ -149,6 +149,21 @@ async function api(request, env) {
     return json({ submissions: rows.results.map(row => ({ ...row, body: parseDocument(row.body_json), body_json: undefined })) });
   }
 
+  // The production CloudBase backend persists these collections. The compact D1
+  // preview schema has no matching tables, but returning their empty read state
+  // keeps authenticated local UI routes available for development and review.
+  if (request.method === 'GET' && path === '/api/drafts/mine') {
+    const auth = await requireUser(request, env);
+    if (auth.response) return auth.response;
+    return json({ drafts: [] }, 200, { 'cache-control': 'private, no-store' });
+  }
+
+  if (request.method === 'GET' && path === '/api/teacher-submissions/mine') {
+    const auth = await requireUser(request, env);
+    if (auth.response) return auth.response;
+    return json({ teacherSubmissions: [] }, 200, { 'cache-control': 'private, no-store' });
+  }
+
   if (request.method === 'POST' && path === '/api/submissions') {
     const auth = await requireUser(request, env);
     if (auth.response) return auth.response;

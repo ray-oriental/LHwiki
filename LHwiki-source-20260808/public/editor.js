@@ -1,22 +1,100 @@
-const BLOCK_TYPES = new Set(['paragraph', 'heading', 'subheading', 'quote', 'bullet', 'number']);
+const BLOCK_TYPES = new Set(['paragraph', 'heading', 'subheading', 'quote', 'bullet', 'number', 'check', 'checked', 'callout', 'code', 'divider']);
 
 const TYPE_LABELS = Object.freeze({
   paragraph: '正文',
-  heading: '二级标题',
-  subheading: '三级标题',
+  heading: '小标题',
+  subheading: '次级标题',
   quote: '引用',
   bullet: '项目列表',
-  number: '编号列表'
+  number: '编号列表',
+  check: '待办清单',
+  checked: '已完成清单',
+  callout: '提示框',
+  code: '代码块',
+  divider: '分隔线'
+});
+
+const INLINE_FORMATS = Object.freeze({
+  bold: { label: 'B', title: '粗体', prefix: '**', suffix: '**' },
+  italic: { label: 'I', title: '斜体', prefix: '*', suffix: '*' },
+  strike: { label: 'S', title: '删除线', prefix: '~~', suffix: '~~' },
+  inlineCode: { label: '</>', title: '行内代码', prefix: '`', suffix: '`' }
 });
 
 const SHORTCUTS = Object.freeze({
+  '# ': 'heading',
   '## ': 'heading',
   '### ': 'subheading',
   '> ': 'quote',
   '- ': 'bullet',
   '* ': 'bullet',
-  '1. ': 'number'
+  '1. ': 'number',
+  '- [ ] ': 'check',
+  '- [x] ': 'checked',
+  '::: ': 'callout',
+  '``` ': 'code',
+  '---': 'divider'
 });
+
+function markdownBlock(type, text = '') {
+  return { id: blockId(), type, text: String(text).slice(0, 8000) };
+}
+
+export function parseMarkdown(markdown = '') {
+  const lines = String(markdown).replace(/\r\n?/g, '\n').split('\n');
+  const blocks = [];
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(markdownBlock('paragraph', paragraph.join('\n')));
+    paragraph = [];
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = line.match(/^\s*```[^`]*$/);
+    if (fence) {
+      flushParagraph();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) codeLines.push(lines[index++]);
+      blocks.push(markdownBlock('code', codeLines.join('\n')));
+      continue;
+    }
+    if (!line.trim()) { flushParagraph(); continue; }
+    const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    const callout = line.match(/^\s*>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    const checklist = line.match(/^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/);
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+    const number = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (heading) { flushParagraph(); blocks.push(markdownBlock(heading[1].length <= 2 ? 'heading' : 'subheading', heading[2])); }
+    else if (callout) { flushParagraph(); blocks.push(markdownBlock('callout', callout[1])); }
+    else if (quote) { flushParagraph(); blocks.push(markdownBlock('quote', quote[1])); }
+    else if (checklist) { flushParagraph(); blocks.push(markdownBlock(checklist[1].trim() ? 'checked' : 'check', checklist[2])); }
+    else if (/^\s*(?:---+|___+|\*\*\*+)\s*$/.test(line)) { flushParagraph(); blocks.push(markdownBlock('divider')); }
+    else if (bullet) { flushParagraph(); blocks.push(markdownBlock('bullet', bullet[1])); }
+    else if (number) { flushParagraph(); blocks.push(markdownBlock('number', number[1])); }
+    else paragraph.push(line);
+  }
+  flushParagraph();
+  return normalizeBlocks(blocks);
+}
+
+export function blocksToMarkdown(blocks = []) {
+  return normalizeBlocks(blocks).map(block => ({
+    paragraph: block.text,
+    heading: `## ${block.text}`,
+    subheading: `### ${block.text}`,
+    quote: `> ${block.text}`,
+    bullet: `- ${block.text}`,
+    number: `1. ${block.text}`,
+    check: `- [ ] ${block.text}`,
+    checked: `- [x] ${block.text}`,
+    callout: `> [!NOTE] ${block.text}`,
+    code: `\`\`\`\n${block.text}\n\`\`\``,
+    divider: '---'
+  })[block.type] ?? block.text).join('\n\n');
+}
 
 export function blockId() {
   const random = crypto.randomUUID?.().replaceAll('-', '').slice(0, 14)
@@ -52,6 +130,23 @@ function caretOffset(element) {
   range.selectNodeContents(element);
   range.setEnd(selection.anchorNode, selection.anchorOffset);
   return range.toString().length;
+}
+
+function selectionOffsets(element) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return { start: 0, end: 0 };
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+    const offset = caretOffset(element);
+    return { start: offset, end: offset };
+  }
+  const before = range.cloneRange();
+  before.selectNodeContents(element);
+  before.setEnd(range.startContainer, range.startOffset);
+  const selected = range.cloneRange();
+  selected.selectNodeContents(element);
+  selected.setEnd(range.endContainer, range.endOffset);
+  return { start: before.toString().length, end: selected.toString().length };
 }
 
 export function setCaret(element, offset = 0, viewport = null) {
@@ -154,6 +249,23 @@ export class BlockEditor {
     this.emitSelection();
   }
 
+  applyInline(prefix, suffix = prefix) {
+    const block = this.currentBlock();
+    const input = this.element(this.activeId);
+    if (!block || !input || block.type === 'divider') return;
+    const { start, end } = selectionOffsets(input);
+    const selected = block.text.slice(start, end);
+    block.text = `${block.text.slice(0, start)}${prefix}${selected}${suffix}${block.text.slice(end)}`.slice(0, 8000);
+    const caret = selected ? end + prefix.length + suffix.length : start + prefix.length;
+    this.renderAndFocus(block.id, Math.min(caret, block.text.length));
+    this.changed();
+  }
+
+  importMarkdown(markdown) {
+    this.setBlocks(parseMarkdown(markdown), { focus: true });
+    this.changed();
+  }
+
   render() {
     const fragment = document.createDocumentFragment();
     for (const block of this.blocks) fragment.append(this.renderBlock(block));
@@ -177,13 +289,13 @@ export class BlockEditor {
     marker.className = 'block-picker';
     marker.dataset.blockPicker = block.type;
     marker.setAttribute('aria-label', `当前为${TYPE_LABELS[block.type]}，点击切换格式`);
-    marker.textContent = block.type === 'heading' ? 'H2' : block.type === 'subheading' ? 'H3' : block.type === 'quote' ? '“' : block.type === 'bullet' ? '•' : block.type === 'number' ? '1.' : '¶';
+    marker.textContent = block.type === 'heading' ? 'H2' : block.type === 'subheading' ? 'H3' : block.type === 'quote' ? '“' : block.type === 'bullet' ? '•' : block.type === 'number' ? '1.' : block.type === 'check' ? '□' : block.type === 'checked' ? '✓' : block.type === 'callout' ? '!' : block.type === 'code' ? '</>' : block.type === 'divider' ? '/' : '¶';
     const input = document.createElement('div');
     input.className = 'block-input';
     input.contentEditable = 'true';
     input.spellcheck = true;
     input.dataset.blockId = block.id;
-    input.dataset.placeholder = block.type === 'heading' ? '章节标题' : block.type === 'subheading' ? '小节标题' : block.type === 'quote' ? '写下一句值得保留的话' : '继续写…';
+    input.dataset.placeholder = block.type === 'heading' ? '章节标题' : block.type === 'subheading' ? '小节标题' : block.type === 'quote' ? '写下一句值得保留的话' : block.type === 'callout' ? '写下需要特别提醒的内容' : block.type === 'code' ? '粘贴代码或等宽文本' : block.type === 'divider' ? '' : '继续写…';
     input.setAttribute('role', 'textbox');
     input.setAttribute('aria-multiline', 'true');
     input.textContent = block.text;
@@ -272,7 +384,17 @@ export class BlockEditor {
     const offset = caretOffset(input);
     const before = block.text.slice(0, offset);
     const after = block.text.slice(offset);
-    if (lines.length === 1) {
+    const markdownLike = lines.length > 1 && lines.some(line => /^\s*(?:#{1,6}\s|>|[-*+]\s|\d+[.)]\s|```|---+$)/.test(line));
+    if (markdownLike) {
+      const inserted = parseMarkdown(text);
+      inserted[0].id = block.id;
+      inserted[0].text = `${before}${inserted[0].text}`.slice(0, 8000);
+      inserted[inserted.length - 1].text = `${inserted.at(-1).text}${after}`.slice(0, 8000);
+      this.blocks.splice(index, 1, ...inserted);
+      const last = inserted.at(-1);
+      this.activeId = last.id;
+      this.renderAndFocus(last.id, Math.max(0, last.text.length - after.length));
+    } else if (lines.length === 1) {
       block.text = `${before}${lines[0]}${after}`.slice(0, 8000);
       this.renderAndFocus(block.id, Math.min(before.length + lines[0].length, block.text.length));
     } else {
@@ -316,4 +438,4 @@ export class BlockEditor {
   }
 }
 
-export { BLOCK_TYPES, TYPE_LABELS };
+export { BLOCK_TYPES, INLINE_FORMATS, TYPE_LABELS };

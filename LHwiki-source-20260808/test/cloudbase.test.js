@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { BLOCK_TYPES as editorBlockTypes } from '../public/editor.js';
+import { BLOCK_TYPES as sharedBlockTypes } from '../shared/content.js';
 
 const require = createRequire(import.meta.url);
 const cloudbaseContent = require('../cloudbase/functions/lhwiki-api/content.cjs');
@@ -12,6 +14,14 @@ test('CloudBase 后端沿用相同的登入规则', () => {
   assert.equal(cloudbaseContent.validLoginId('202512343'), true);
   assert.equal(cloudbaseContent.validLoginId('ray_oriental'), true);
   assert.equal(cloudbaseContent.validLoginId('20260043'), false);
+});
+
+test('前端、回退 Worker 与 CloudBase 使用相同的正文样式白名单', () => {
+  const expected = ['bullet', 'callout', 'check', 'checked', 'code', 'divider', 'heading', 'number', 'paragraph', 'quote', 'subheading'];
+  assert.deepEqual([...editorBlockTypes].sort(), expected);
+  assert.deepEqual([...sharedBlockTypes].sort(), expected);
+  assert.deepEqual([...cloudbaseContent.BLOCK_TYPES].sort(), expected);
+  assert.deepEqual(cloudbaseContent.parseDocument(expected.map(type => ({ type, text: type === 'divider' ? '' : type }))).map(block => block.type).sort(), expected);
 });
 
 test('普通学生登入不会把学号扫描放大为数据库写入', async () => {

@@ -1,6 +1,6 @@
 const STUDENT_ID_PATTERN = /^20\d{7}$/;
 const ADMIN_LOGIN_ID = 'ray_oriental';
-const BLOCK_TYPES = new Set(['paragraph', 'heading', 'subheading', 'quote', 'bullet', 'number']);
+const BLOCK_TYPES = new Set(['paragraph', 'heading', 'subheading', 'quote', 'bullet', 'number', 'check', 'checked', 'callout', 'code', 'divider']);
 const CONTENT_TYPES = new Set(['访谈', '评价', '经验', '指南', '说明']);
 const BLOCK_ID_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
 const KNOWN_TEACHER_NAMES = new Set([
@@ -40,11 +40,12 @@ function parseBlocks(value, { allowEmpty = false } = {}) {
   for (const block of blocks) {
     if (!block || !BLOCK_TYPES.has(block.type) || typeof block.text !== 'string') return null;
     const text = block.text.replace(/\r\n?/g, '\n').slice(0, 8000);
-    if (text.trim() || allowEmpty) {
+    const preserveEmpty = allowEmpty || block.type === 'divider';
+    if (text.trim() || preserveEmpty) {
       clean.push({
         ...(typeof block.id === 'string' && BLOCK_ID_PATTERN.test(block.id) ? { id: block.id } : {}),
         type: block.type,
-        text: allowEmpty ? text : text.trim()
+        text: preserveEmpty ? text : text.trim()
       });
     }
   }
@@ -69,6 +70,7 @@ function slugify(title) {
 
 module.exports = {
   ADMIN_LOGIN_ID,
+  BLOCK_TYPES,
   CONTENT_TYPES,
   KNOWN_TEACHER_NAMES,
   normalizeText,

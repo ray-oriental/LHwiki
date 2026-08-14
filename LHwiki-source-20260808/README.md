@@ -49,7 +49,13 @@
 ```powershell
 pnpm install
 pnpm test
+Copy-Item .dev.vars.example .dev.vars
+# 将 .dev.vars 中的 SESSION_SECRET 替换为至少 32 字节的本地随机字符串
+pnpm db:local
+pnpm dev -- --local --port 8787
 ```
+
+启动后访问 <http://localhost:8787>。如果使用 npm，对应命令为 `npm install`、`npm test`、`npm run db:local` 和 `npm run dev -- --local --port 8787`。只浏览公开页面可以不配置会话密钥；需要登入时必须先配置 `.dev.vars` 中的 `SESSION_SECRET`。开发服务器需要保持运行，关闭终端或按下 `Ctrl+C` 后网站将无法访问。
 
 Cloudflare 回退版本的本地开发命令和密钥样例仍保留在 `package.json`、`.dev.vars.example` 与 `wrangler.jsonc` 中。CloudBase 生产部署不要把服务器 API Key 写入源码、前端或 `.env` 文件。
 
