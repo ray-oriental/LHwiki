@@ -13,6 +13,7 @@ backup/*.sha256
 backup/maintenance.log
 backup/ATTENTION.txt
 release/
+archive/
 *.clixml
 *.pem
 *.key

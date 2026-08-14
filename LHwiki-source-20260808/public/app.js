@@ -1,6 +1,8 @@
 import { formatDate } from './date.js';
-import { BlockEditor, TYPE_LABELS, normalizeBlocks } from './editor.js?v=20260810-editor-stability';
-import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js?v=20260811-resource-budget';
+import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260813-editor-studio';
+import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
+import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js?v=20260813-editor-studio';
+import { changelogPage } from './changelog.js?v=20260813-changelog';
 
 const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
@@ -159,6 +161,7 @@ function shell(content) {
       ${state.user ? navLink('#/mine', '◷', '我的投稿', current.page === 'mine') : ''}
       ${roleTools}${adminTools}
       <div class="side-footer"><p>把经验说具体，也给不同的经历留位置。</p><a href="#/about" class="button small">阅读共建说明</a></div>
+      <div class="sidebar-changelog">${navLink('#/changelog', '↻', '更新日志', current.page === 'changelog')}</div>
     </aside>
     <main class="main">
       <header class="topbar">
@@ -458,7 +461,7 @@ async function contributePage() {
           <label class="title-field"><span>标题</span><input name="title" maxlength="100" placeholder="给这段经历一个具体的标题" required></label>
           <label><span>一句话摘要</span><textarea name="summary" maxlength="240" placeholder="告诉读者背景、重点和适合谁阅读" required></textarea></label>
           <label><span>评价对象或访谈主题（选填）</span><input name="subject" maxlength="80" placeholder="例如：文学社 / 高三一轮复习"></label></div>
-          <div class="editor-chrome"><div class="editor-toolbar" aria-label="段落格式">${Object.entries(TYPE_LABELS).map(([type, label]) => `<button type="button" class="tool" data-editor-type="${type}">${label}</button>`).join('')}</div><span class="editor-hint">Enter 新段落 · Shift+Enter 换行 · 输入 / 选择格式</span></div>
+          <div class="editor-chrome"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块">＋ <span>插入</span></button><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · Shift+Enter 换行</span></div>
           <div id="block-editor" class="block-editor" aria-label="文章正文"></div>
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
@@ -481,6 +484,7 @@ function setFormSnapshot(form, snapshot) {
 
 function collectSnapshot(form, editor) {
   return {
+    schemaVersion: EDITOR_SCHEMA_VERSION,
     sectionSlug: form.elements.sectionSlug.value,
     contentType: form.elements.contentType.value,
     title: form.elements.title.value,
@@ -550,7 +554,7 @@ function bindEditorExperience(context, initial) {
     syncByline();
     manager.update(collectSnapshot(form, editor));
   });
-  document.querySelectorAll('[data-editor-type]').forEach(button => button.addEventListener('click', () => editor.setCurrentType(button.dataset.editorType)));
+  document.querySelector('[data-editor-insert]').addEventListener('click', () => editor.openCommandPalette(editor.element(editor.activeId)));
   document.querySelector('[data-save-now]').addEventListener('click', () => manager.saveNow());
   document.querySelector('[data-delete-current-draft]').addEventListener('click', async event => {
     if (!confirm('确定删除这份草稿吗？所有尚未提交的内容都会被清除，且无法恢复。')) return;
@@ -757,20 +761,11 @@ async function refreshVisitCount({ force = false } = {}) {
 }
 
 function renderBlocks(container, blocks = [], { anchors = false } = {}) {
-  let currentList = null;
   const headings = [];
   const usedIds = new Set();
   let headingIndex = 0;
-  for (const block of blocks) {
-    if (block.type === 'bullet' || block.type === 'number') {
-      const tag = block.type === 'bullet' ? 'UL' : 'OL';
-      if (!currentList || currentList.tagName !== tag) { currentList = document.createElement(tag); container.append(currentList); }
-      const item = document.createElement('li'); item.textContent = block.text; currentList.append(item); continue;
-    }
-    currentList = null;
-    const element = document.createElement(block.type === 'heading' ? 'h2' : block.type === 'subheading' ? 'h3' : block.type === 'quote' ? 'blockquote' : 'p');
-    element.textContent = block.text;
-    if (anchors && ['heading', 'subheading'].includes(block.type)) {
+  const addHeading = (element, block, level) => {
+    if (anchors) {
       headingIndex += 1;
       const base = /^[A-Za-z0-9_-]{6,64}$/.test(block.id || '') ? `section-${block.id}` : `section-${headingIndex}`;
       let id = base;
@@ -779,10 +774,40 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
       usedIds.add(id);
       element.id = id;
       element.classList.add('article-heading-anchor');
-      headings.push({ id, level: block.type === 'subheading' ? 3 : 2, text: block.text });
+      headings.push({ id, level, text: block.text });
     }
-    container.append(element);
-  }
+  };
+  const appendSequence = (target, sequence) => {
+    let currentList = null;
+    for (const block of sequence) {
+      if (block.type === 'bullet' || block.type === 'number') {
+        const tag = block.type === 'bullet' ? 'UL' : 'OL';
+        if (!currentList || currentList.tagName !== tag) { currentList = document.createElement(tag); target.append(currentList); }
+        const item = document.createElement('li'); item.textContent = block.text; currentList.append(item); continue;
+      }
+      currentList = null;
+      if (block.type === 'divider') { target.append(document.createElement('hr')); continue; }
+      if (block.type === 'formula') { const formula = document.createElement('div'); formula.className = 'published-formula'; renderMath(formula, block.text); target.append(formula); continue; }
+      if (block.type === 'table') {
+        const region = document.createElement('div'); region.className = 'published-table-scroll'; const table = document.createElement('table'); const body = document.createElement('tbody');
+        block.rows.forEach((row, rowIndex) => { const tr = document.createElement('tr'); row.forEach(cell => { const item = document.createElement(block.header !== false && rowIndex === 0 ? 'th' : 'td'); item.textContent = cell; tr.append(item); }); if (block.header !== false && rowIndex === 0) { const head = document.createElement('thead'); head.append(tr); table.append(head); } else body.append(tr); });
+        table.append(body); region.append(table); target.append(region); continue;
+      }
+      if (block.type === 'columns') {
+        const grid = document.createElement('div'); grid.className = `published-columns columns-${block.columns.length}`;
+        block.columns.forEach(column => { const area = document.createElement('section'); appendSequence(area, column); grid.append(area); }); target.append(grid); continue;
+      }
+      if (block.type === 'toggle') {
+        const details = document.createElement('details'); details.className = 'published-toggle'; details.open = block.open !== false; const summary = document.createElement('summary');
+        const title = document.createElement(block.level === 3 ? 'h3' : 'h2'); title.textContent = block.text; addHeading(title, block, block.level === 3 ? 3 : 2); summary.append(title); details.append(summary);
+        const children = document.createElement('div'); children.className = 'published-toggle-children'; appendSequence(children, block.children || []); details.append(children); target.append(details); continue;
+      }
+      const level = block.type === 'heading' ? 2 : block.type === 'subheading' ? 3 : block.type === 'minorheading' ? 4 : null;
+      const element = document.createElement(level ? `h${level}` : block.type === 'quote' ? 'blockquote' : 'p'); element.textContent = block.text;
+      if (level) addHeading(element, block, level); target.append(element);
+    }
+  };
+  appendSequence(container, blocks);
   return headings;
 }
 
@@ -803,6 +828,8 @@ function renderArticleToc(aside, headings) {
     const target = document.getElementById(link.dataset.tocId);
     if (!target) return;
     event.preventDefault();
+    const collapsedSection = target.closest('details');
+    if (collapsedSection) collapsedSection.open = true;
     target.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   }));
 }
@@ -959,7 +986,7 @@ async function render() {
   if (current.page === 'review') return reviewPage();
   if (current.page === 'admin') return adminPage();
   if (['contribute', 'admin-article-edit', 'admin-review-edit'].includes(current.page)) return contributePage();
-  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, search: searchPage };
+  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, changelog: changelogPage, search: searchPage };
   shell((pages[current.page] || notFound)());
 }
 

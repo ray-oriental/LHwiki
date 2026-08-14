@@ -80,6 +80,7 @@ export class DraftManager {
 
   snapshotFromDraft(draft) {
     return {
+      schemaVersion: Number(draft.schemaVersion) || 1,
       sectionSlug: draft.sectionSlug || '',
       contentType: draft.contentType || '',
       title: draft.title || '',
@@ -207,6 +208,11 @@ export class DraftManager {
         this.conflicted = true;
         this.setState('conflict', '这份草稿已在其他页面更新');
         this.onConflict(error.data.conflict, clone(this.snapshot));
+        return null;
+      }
+      if (error.status === 409 && error.data?.upgradeRequired) {
+        this.conflicted = true;
+        this.setState('conflict', '页面版本已更新，请刷新后继续编辑；本机内容仍已保留');
         return null;
       }
       this.setState(navigator.onLine ? 'failed' : 'offline', navigator.onLine ? '云端保存失败，将自动重试' : '离线：已保存在这台设备');
