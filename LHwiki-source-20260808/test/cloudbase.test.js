@@ -199,6 +199,19 @@ test('draft routes require ownership and optimistic revisions', async () => {
   assert.match(source, /status: 409|}, 409\)/);
   assert.match(source, /student_id: auth\.user\.student_id/);
   assert.match(source, /draft\.target_type === 'article'/);
+  assert.match(source, /containsAdvancedBlocks\(existingBody\)/);
+  assert.match(source, /containsAdvancedBlocks\(target\.sourceBody \|\| \[\]\)/);
+  assert.match(source, /upgradeRequired: true/);
+  assert.match(source, /snapshot\?\.schemaVersion/);
+});
+
+test('CloudBase content parser counts nested advanced content for submission limits', () => {
+  const body = cloudbaseContent.parseDocument([
+    { type: 'toggle', level: 2, text: '标题', children: [{ type: 'paragraph', text: '正文内容' }] },
+    { type: 'table', rows: [['列', '值'], ['人数', '12']] }
+  ]);
+  assert.deepEqual(cloudbaseContent.documentStats(body), { characters: 12, blocks: 3 });
+  assert.equal(cloudbaseContent.containsAdvancedBlocks(body), true);
 });
 
 test('受保护管理员不能被权限接口降权，并拥有已发布文章管理接口', async () => {

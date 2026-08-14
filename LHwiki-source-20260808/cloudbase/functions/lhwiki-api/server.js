@@ -7,7 +7,10 @@ const { createPgStore } = require('./pg-store.cjs');
 const {
   ADMIN_LOGIN_ID,
   CONTENT_TYPES,
+  DOCUMENT_SCHEMA_VERSION,
   KNOWN_TEACHER_NAMES,
+  containsAdvancedBlocks,
+  documentStats,
   normalizeText,
   parseDocument,
   parseDraftDocument,
@@ -280,6 +283,7 @@ function mapTeacherAddition(row) {
 function mapDraft(row) {
   const clean = withoutId(row);
   if (!clean) return null;
+  const body = parseDraftDocument(clean.body_json) || [];
   return {
     id: clean.id,
     draftKey: clean.draft_key,
@@ -288,7 +292,8 @@ function mapDraft(row) {
     sectionSlug: clean.section_slug,
     title: clean.title,
     summary: clean.summary,
-    body: parseDraftDocument(clean.body_json) || [],
+    schemaVersion: containsAdvancedBlocks(body) ? DOCUMENT_SCHEMA_VERSION : 1,
+    body,
     contentType: clean.content_type,
     subject: clean.subject,
     authorLabel: clean.author_label,
@@ -353,12 +358,13 @@ async function validateDraftTarget(user, targetType, targetId, requestedDraftKey
     const submission = withoutId(await getDocument('submissions', targetId));
     if (!canEditSubmission(user, submission)) return { error: '没有找到这份投稿', status: 404 };
     if (!['pending', 'changes_requested'].includes(submission.status)) return { error: '当前投稿状态不能修改', status: 409 };
-    return { draftKey: `submission:${targetId}`, targetId };
+    return { draftKey: `submission:${targetId}`, targetId, sourceBody: parseDraftDocument(submission.body_json) || [] };
   }
   if (targetType === 'article') {
     if (user.role !== 'admin') return { error: '需要管理员权限', status: 403 };
-    if (!withoutId(await getDocument('articles', targetId))) return { error: '没有找到这篇已发布内容', status: 404 };
-    return { draftKey: `article:${targetId}`, targetId };
+    const article = withoutId(await getDocument('articles', targetId));
+    if (!article) return { error: '没有找到这篇已发布内容', status: 404 };
+    return { draftKey: `article:${targetId}`, targetId, sourceBody: parseDraftDocument(article.body_json) || [] };
   }
   return { error: '草稿目标无效' };
 }
@@ -550,6 +556,9 @@ async function route(request) {
       draft_key: target.draftKey
     }, 1))[0];
     if (existing) return result({ draft: mapDraft(existing) });
+    if (containsAdvancedBlocks(target.sourceBody || []) && Number(data?.snapshot?.schemaVersion || 1) < DOCUMENT_SCHEMA_VERSION) {
+      return result({ error: '此内容包含新版编辑块，请刷新页面后继续编辑', upgradeRequired: true }, 409);
+    }
     const prepared = normalizeDraftSnapshot(data?.snapshot || {});
     if (prepared.error) return error(prepared.error);
     auth.user = await ensurePersistentUser(auth.user);
@@ -591,6 +600,10 @@ async function route(request) {
     const data = await readJson(request);
     const expectedRevision = Number(data?.expectedRevision);
     if (!Number.isInteger(expectedRevision) || expectedRevision < 1) return error('草稿版本无效');
+    const existingBody = parseDraftDocument(existing.body_json) || [];
+    if (containsAdvancedBlocks(existingBody) && Number(data?.snapshot?.schemaVersion || 1) < DOCUMENT_SCHEMA_VERSION) {
+      return result({ error: '此草稿包含新版内容，请刷新页面后继续编辑', conflict: mapDraft(existing) }, 409);
+    }
     const prepared = normalizeDraftSnapshot(data?.snapshot);
     if (prepared.error) return error(prepared.error);
     const timestamp = now();
@@ -906,7 +919,7 @@ async function validateSubmission(data) {
   const authorLabel = data?.anonymous ? '匿名同学' : normalizeText(data?.authorLabel, 40);
   if (!title || title.length < 4) return { error: '标题至少需要 4 个字' };
   if (!summary || summary.length < 10) return { error: '摘要至少需要 10 个字' };
-  if (!blocks || blocks.reduce((sum, block) => sum + block.text.length, 0) < 50) return { error: '正文至少需要 50 个字' };
+  if (!blocks || documentStats(blocks).characters < 50) return { error: '正文至少需要 50 个字' };
   if (!contentType) return { error: '请选择内容类型' };
   if (!authorLabel) return { error: '请填写署名或选择匿名' };
   if (!await getDocument('sections', section)) return { error: '分区不存在' };
