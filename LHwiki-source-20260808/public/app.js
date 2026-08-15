@@ -1,8 +1,9 @@
 import { formatDate } from './date.js';
-import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260813-editor-studio';
+import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260815-markdown';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor } from './draft-manager.js?v=20260813-editor-studio';
-import { changelogPage } from './changelog.js?v=20260813-changelog';
+import { changelogPage } from './changelog.js?v=20260815-dark-markdown';
+import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-markdown';
 
 const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
@@ -143,6 +144,12 @@ function navLink(href, icon, label, active) {
   return `<a class="nav-link ${active ? 'active' : ''}" href="${href}"><span class="emoji">${icon}</span><span>${esc(label)}</span></a>`;
 }
 
+function themeControl() {
+  const preference = window.LHTheme?.preference?.() || 'system';
+  const labels = { system: '跟随系统', light: '浅色', dark: '深色' };
+  return `<div class="theme-control"><button type="button" class="icon-button theme-button" data-theme-menu aria-label="外观：${labels[preference]}" aria-haspopup="menu" aria-expanded="false">◐</button><div class="menu theme-menu" data-theme-options role="menu" hidden>${Object.entries(labels).map(([mode, label]) => `<button type="button" role="menuitemradio" aria-checked="${mode === preference}" data-theme-mode="${mode}">${label}</button>`).join('')}</div></div>`;
+}
+
 function shell(content) {
   const current = route();
   const roleTools = state.user && ['reviewer', 'admin'].includes(state.user.role)
@@ -168,6 +175,7 @@ function shell(content) {
         <button class="icon-button mobile-menu" id="mobile-menu" aria-label="打开目录">☰</button>
         <label class="search"><span>⌕</span><input id="search" value="${esc(state.search)}" placeholder="搜索老师、课程、社团或经验" aria-label="搜索"></label>
         <div class="actions">
+          ${themeControl()}
           <a class="button primary" href="#/contribute"><span>＋</span><span class="contribute-label">提交内容</span></a>
           ${userControl()}
         </div>
@@ -195,6 +203,20 @@ function bindShell() {
   document.querySelectorAll('[data-login]').forEach(button => button.addEventListener('click', () => loginDialog.showModal()));
   const menuButton = document.querySelector('#user-menu-button');
   menuButton?.addEventListener('click', () => { const menu = document.querySelector('#user-menu'); menu.hidden = !menu.hidden; });
+  const themeButton = document.querySelector('[data-theme-menu]');
+  const themeMenu = document.querySelector('[data-theme-options]');
+  themeButton?.addEventListener('click', () => {
+    themeMenu.hidden = !themeMenu.hidden;
+    themeButton.setAttribute('aria-expanded', String(!themeMenu.hidden));
+  });
+  themeMenu?.querySelectorAll('[data-theme-mode]').forEach(button => button.addEventListener('click', () => {
+    window.LHTheme?.apply(button.dataset.themeMode, { persist: true });
+    themeMenu.querySelectorAll('[data-theme-mode]').forEach(option => option.setAttribute('aria-checked', String(option === button)));
+    const labels = { system: '跟随系统', light: '浅色', dark: '深色' };
+    themeButton.setAttribute('aria-label', `外观：${labels[button.dataset.themeMode]}`);
+    themeButton.setAttribute('aria-expanded', 'false');
+    themeMenu.hidden = true;
+  }));
   document.querySelector('[data-logout]')?.addEventListener('click', logout);
   document.querySelector('[data-access]')?.addEventListener('click', redeemAccess);
   bindTeacherReviewButtons();
@@ -461,13 +483,14 @@ async function contributePage() {
           <label class="title-field"><span>标题</span><input name="title" maxlength="100" placeholder="给这段经历一个具体的标题" required></label>
           <label><span>一句话摘要</span><textarea name="summary" maxlength="240" placeholder="告诉读者背景、重点和适合谁阅读" required></textarea></label>
           <label><span>评价对象或访谈主题（选填）</span><input name="subject" maxlength="80" placeholder="例如：文学社 / 高三一轮复习"></label></div>
-          <div class="editor-chrome"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块">＋ <span>插入</span></button><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · Shift+Enter 换行</span></div>
+          <div class="editor-chrome"><div class="editor-actions"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块">＋ <span>插入</span></button><button type="button" class="editor-insert" data-markdown-open>Markdown</button></div><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · Shift+Enter 换行</span></div>
           <div id="block-editor" class="block-editor" aria-label="文章正文"></div>
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
         </section>
         <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>准备自动保存</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，自动保存已经暂停。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>清除本机与云端尚未提交的内容</small></div><p class="form-error" data-form-error></p></aside>
         <dialog class="preview-dialog" id="preview-dialog"><div class="preview-head"><strong>投稿预览</strong><button type="button" class="icon-button" data-close-preview aria-label="关闭预览">×</button></div><article class="prose" id="preview-prose"></article></dialog>
+        <dialog class="preview-dialog markdown-dialog" id="markdown-dialog"><div class="preview-head"><strong>Markdown 输入与输出</strong><button type="button" class="icon-button" data-markdown-close aria-label="关闭 Markdown 面板">×</button></div><p class="muted">支持标题、引用、列表、表格、公式、分隔线和安全的行内格式。分栏与折叠块会以 LHwiki 扩展代码块无损保留。</p><label>Markdown 正文<textarea class="markdown-source" data-markdown-source spellcheck="false"></textarea></label><div class="form-actions"><button type="button" class="button" data-markdown-export>从当前正文生成</button><button type="button" class="button" data-markdown-copy>复制</button><button type="button" class="button primary" data-markdown-import>导入并替换正文</button></div></dialog>
       </form>`);
     bindEditorExperience(context, initial);
   } catch (err) {
@@ -555,6 +578,26 @@ function bindEditorExperience(context, initial) {
     manager.update(collectSnapshot(form, editor));
   });
   document.querySelector('[data-editor-insert]').addEventListener('click', () => editor.openCommandPalette(editor.element(editor.activeId)));
+  const markdownDialog = document.querySelector('#markdown-dialog');
+  const markdownSource = document.querySelector('[data-markdown-source]');
+  const exportMarkdown = () => { markdownSource.value = blocksToMarkdown(editor.getBlocks()); };
+  document.querySelector('[data-markdown-open]').addEventListener('click', () => { exportMarkdown(); markdownDialog.showModal(); });
+  document.querySelector('[data-markdown-close]').addEventListener('click', () => markdownDialog.close());
+  document.querySelector('[data-markdown-export]').addEventListener('click', exportMarkdown);
+  document.querySelector('[data-markdown-copy]').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(markdownSource.value); toast('Markdown 已复制'); }
+    catch { markdownSource.select(); toast('无法自动复制，请使用系统复制命令'); }
+  });
+  document.querySelector('[data-markdown-import]').addEventListener('click', () => {
+    if (!confirm('导入会替换当前正文，并由自动保存记录新版本。是否继续？')) return;
+    editor.setBlocks(parseMarkdown(markdownSource.value), { focus: true });
+    const importedStats = editor.stats();
+    document.querySelector('[data-character-count]').textContent = importedStats.characters;
+    document.querySelector('[data-block-count]').textContent = importedStats.blocks;
+    manager.update(collectSnapshot(form, editor));
+    markdownDialog.close();
+    toast('Markdown 已导入');
+  });
   document.querySelector('[data-save-now]').addEventListener('click', () => manager.saveNow());
   document.querySelector('[data-delete-current-draft]').addEventListener('click', async event => {
     if (!confirm('确定删除这份草稿吗？所有尚未提交的内容都会被清除，且无法恢复。')) return;
@@ -774,7 +817,18 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
       usedIds.add(id);
       element.id = id;
       element.classList.add('article-heading-anchor');
-      headings.push({ id, level, text: block.text });
+      headings.push({ id, level, text: parseInlineMarkdown(block.text).map(part => part.text).join('') });
+    }
+  };
+  const appendInline = (element, value) => {
+    for (const part of parseInlineMarkdown(value)) {
+      if (part.type === 'text') element.append(document.createTextNode(part.text));
+      else if (part.type === 'link') {
+        const link = document.createElement('a'); link.textContent = part.text; link.href = part.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; element.append(link);
+      } else {
+        const tag = part.type === 'strong' ? 'strong' : part.type === 'emphasis' ? 'em' : part.type === 'strike' ? 'del' : 'code';
+        const child = document.createElement(tag); child.textContent = part.text; element.append(child);
+      }
     }
   };
   const appendSequence = (target, sequence) => {
@@ -783,14 +837,14 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
       if (block.type === 'bullet' || block.type === 'number') {
         const tag = block.type === 'bullet' ? 'UL' : 'OL';
         if (!currentList || currentList.tagName !== tag) { currentList = document.createElement(tag); target.append(currentList); }
-        const item = document.createElement('li'); item.textContent = block.text; currentList.append(item); continue;
+        const item = document.createElement('li'); appendInline(item, block.text); currentList.append(item); continue;
       }
       currentList = null;
       if (block.type === 'divider') { target.append(document.createElement('hr')); continue; }
       if (block.type === 'formula') { const formula = document.createElement('div'); formula.className = 'published-formula'; renderMath(formula, block.text); target.append(formula); continue; }
       if (block.type === 'table') {
         const region = document.createElement('div'); region.className = 'published-table-scroll'; const table = document.createElement('table'); const body = document.createElement('tbody');
-        block.rows.forEach((row, rowIndex) => { const tr = document.createElement('tr'); row.forEach(cell => { const item = document.createElement(block.header !== false && rowIndex === 0 ? 'th' : 'td'); item.textContent = cell; tr.append(item); }); if (block.header !== false && rowIndex === 0) { const head = document.createElement('thead'); head.append(tr); table.append(head); } else body.append(tr); });
+        block.rows.forEach((row, rowIndex) => { const tr = document.createElement('tr'); row.forEach(cell => { const item = document.createElement(block.header !== false && rowIndex === 0 ? 'th' : 'td'); appendInline(item, cell); tr.append(item); }); if (block.header !== false && rowIndex === 0) { const head = document.createElement('thead'); head.append(tr); table.append(head); } else body.append(tr); });
         table.append(body); region.append(table); target.append(region); continue;
       }
       if (block.type === 'columns') {
@@ -799,11 +853,13 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
       }
       if (block.type === 'toggle') {
         const details = document.createElement('details'); details.className = 'published-toggle'; details.open = block.open !== false; const summary = document.createElement('summary');
-        const title = document.createElement(block.level === 3 ? 'h3' : 'h2'); title.textContent = block.text; addHeading(title, block, block.level === 3 ? 3 : 2); summary.append(title); details.append(summary);
+        const title = document.createElement(block.level === 3 ? 'h3' : 'h2'); appendInline(title, block.text); addHeading(title, block, block.level === 3 ? 3 : 2); summary.append(title); details.append(summary);
         const children = document.createElement('div'); children.className = 'published-toggle-children'; appendSequence(children, block.children || []); details.append(children); target.append(details); continue;
       }
       const level = block.type === 'heading' ? 2 : block.type === 'subheading' ? 3 : block.type === 'minorheading' ? 4 : null;
-      const element = document.createElement(level ? `h${level}` : block.type === 'quote' ? 'blockquote' : 'p'); element.textContent = block.text;
+      const fenced = block.type === 'paragraph' ? codeFence(block.text) : null;
+      if (fenced) { const pre = document.createElement('pre'); const code = document.createElement('code'); if (fenced.language) code.dataset.language = fenced.language; code.textContent = fenced.code; pre.append(code); target.append(pre); continue; }
+      const element = document.createElement(level ? `h${level}` : block.type === 'quote' ? 'blockquote' : 'p'); appendInline(element, block.text);
       if (level) addHeading(element, block, level); target.append(element);
     }
   };

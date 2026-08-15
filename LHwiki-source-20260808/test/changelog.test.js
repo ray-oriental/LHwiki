@@ -5,7 +5,7 @@ import { CHANGELOG_ENTRIES, changelogPage } from '../public/changelog.js';
 
 test('站内更新日志倒序覆盖所有历史版本且不记录改名', () => {
   assert.deepEqual(CHANGELOG_ENTRIES.map(entry => entry.version), [
-    'v0.8.0', 'v0.7.0', 'v0.6.0', 'v0.5.1', 'v0.5.0', 'v0.4.0', 'v0.3.0', 'v0.2.0', 'v0.1.0'
+    'v0.8.1', 'v0.8.0', 'v0.7.0', 'v0.6.0', 'v0.5.1', 'v0.5.0', 'v0.4.0', 'v0.3.0', 'v0.2.0', 'v0.1.0'
   ]);
   assert.ok(CHANGELOG_ENTRIES.every(entry => entry.date && entry.title && entry.items.length));
   assert.doesNotMatch(JSON.stringify(CHANGELOG_ENTRIES), /更名|改名|同窗手册/);

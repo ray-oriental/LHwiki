@@ -1,5 +1,15 @@
 export const CHANGELOG_ENTRIES = Object.freeze([
   {
+    version: 'v0.8.1',
+    title: '深色模式与 Markdown',
+    date: '2026-08-15',
+    items: [
+      '新增跟随系统、浅色和深色三种外观选择，并记住手动偏好。',
+      '投稿编辑器支持 Markdown 输入与输出，兼容现有标题、列表、表格、公式、分栏和折叠内容。',
+      'Markdown 链接和代码采用安全文本渲染，不改变数据库结构、云端接口或角色权限。'
+    ]
+  },
+  {
     version: 'v0.8.0',
     title: '轻量文档工作台与更新日志',
     date: '2026-08-13',

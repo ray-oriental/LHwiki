@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { BlockEditor, addTableRow, cloneBlockTree, filterCommands, mergeBlocks, normalizeBlocks, setCaret, splitBlock, tableTabTarget } from '../public/editor.js';
 import { DraftManager, draftKeyFor } from '../public/draft-manager.js';
+import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from '../public/markdown.js';
 
 test('editor normalizes legacy blocks and preserves structured headings', () => {
   const blocks = normalizeBlocks([
@@ -176,6 +177,31 @@ test('advanced editor blocks normalize to stable bounded structures', () => {
   assert.equal(blocks[2].children[0].type, 'minorheading');
 });
 
+test('Markdown maps onto the v0.8 editor schema without adding server block types', () => {
+  const blocks = parseMarkdown('## 标题\n\n### 小节\n\n#### 细目\n\n> 引用\n\n- 项目\n\n1. 编号\n\n| 姓名 | 学科 |\n| --- | --- |\n| 李老师 | 语文 |\n\n```math\nx^2\n```\n\n---');
+  assert.deepEqual(blocks.map(block => block.type), ['heading', 'subheading', 'minorheading', 'quote', 'bullet', 'number', 'table', 'formula', 'divider']);
+  assert.deepEqual(blocks[6].rows, [['姓名', '学科'], ['李老师', '语文']]);
+  assert.equal(blocks[7].text, 'x^2');
+});
+
+test('Markdown round-trip preserves columns and toggles through bounded LHwiki blocks', () => {
+  const original = normalizeBlocks([
+    { type: 'columns', columns: [[{ type: 'paragraph', text: '左栏' }], [{ type: 'formula', text: 'a+b' }]] },
+    { type: 'toggle', level: 3, text: '展开阅读', open: false, children: [{ type: 'paragraph', text: '内容' }] }
+  ]);
+  const restored = parseMarkdown(blocksToMarkdown(original));
+  assert.deepEqual(restored.map(block => block.type), ['columns', 'toggle']);
+  assert.equal(restored[0].columns[0][0].text, '左栏');
+  assert.equal(restored[1].open, false);
+  assert.equal(restored[1].children[0].text, '内容');
+});
+
+test('Markdown inline parsing keeps links protocol-bound and code fences inert', () => {
+  assert.deepEqual(parseInlineMarkdown('**粗体**、*斜体*、~~删除~~、`代码`、[官网](https://luhe.net/)').map(part => part.type), ['strong', 'text', 'emphasis', 'text', 'strike', 'text', 'code', 'text', 'link']);
+  assert.equal(parseInlineMarkdown('[危险](javascript:alert(1))')[0].type, 'text');
+  assert.deepEqual(codeFence('```js\nalert(1)\n```'), { language: 'js', code: 'alert(1)' });
+});
+
 test('duplicating containers recursively assigns unique block ids', () => {
   const [columns, toggle] = normalizeBlocks([
     { id: 'b_columns1', type: 'columns', columns: [[{ id: 'b_child001', type: 'paragraph', text: '左' }], [{ id: 'b_child002', type: 'formula', text: 'x^2' }]] },
@@ -215,10 +241,11 @@ test('IME composition guards Enter from splitting a block', () => {
 });
 
 test('editor studio keeps one restrained entry point and a narrow-screen overflow contract', async () => {
-  const [app, css, html] = await Promise.all([
+  const [app, css, html, theme] = await Promise.all([
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
     readFile(new URL('../public/styles.css', import.meta.url), 'utf8'),
-    readFile(new URL('../public/index.html', import.meta.url), 'utf8')
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/theme.js', import.meta.url), 'utf8')
   ]);
   assert.match(app, /data-editor-insert/);
   assert.doesNotMatch(app, /data-editor-type/);
@@ -227,8 +254,13 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(app, /published-toggle/);
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
-  assert.match(html, /20260813-editor-studio/);
+  assert.match(html, /20260815-dark-markdown-2/);
   assert.match(app, /draft-manager\.js\?v=20260813-editor-studio/);
+  assert.match(app, /data-markdown-open/);
+  assert.match(html, /theme\.js\?v=20260815-dark-mode/);
+  assert.match(css, /:root\[data-theme-effective="dark"\]/);
+  assert.match(theme, /prefers-color-scheme: dark/);
+  assert.match(theme, /lhwiki:theme/);
 });
 
 test('client upgrade conflicts stop cloud retries and preserve the local snapshot', async () => {
