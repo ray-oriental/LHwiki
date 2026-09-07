@@ -142,6 +142,22 @@ test('login, signed session, origin validation and logout run entirely locally',
   });
 });
 
+test('ordinary login scans and signed student sessions reuse the privilege cache without per-request user reads', async () => {
+  await useHarness({}, async ({ store, client }) => {
+    const first = client();
+    assert.equal((await first.login(STUDENT_ID)).status, 200);
+
+    store.failNext('queryDocuments', 'users', new Error('privilege cache should be reused'));
+    const second = client();
+    assert.equal((await second.login(OTHER_ID)).status, 200);
+
+    store.failNext('getDocument', 'users', new Error('student session should be database-free'));
+    const session = await first.request('/api/session');
+    assert.equal(session.status, 200);
+    assert.equal(session.data.user.role, 'student');
+  });
+});
+
 test('draft CRUD enforces ownership and optimistic revision conflicts over HTTP', async () => {
   await useHarness({}, async ({ client, store }) => {
     const owner = client();
@@ -151,22 +167,30 @@ test('draft CRUD enforces ownership and optimistic revision conflicts over HTTP'
 
     const created = await owner.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '' }) }
+      body: { clientVersion: 4, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '' }) }
     });
     assert.equal(created.status, 201);
     assert.equal(created.data.draft.revision, 1);
     const draftId = created.data.draft.id;
     assert.equal((await owner.request('/api/drafts/mine')).data.drafts.length, 1);
 
+    const duplicateWithoutRevision = await owner.request('/api/drafts', {
+      method: 'POST',
+      body: { clientVersion: 4, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '另一标签页' }) }
+    });
+    assert.equal(duplicateWithoutRevision.status, 409);
+    assert.equal(duplicateWithoutRevision.data.conflict.revision, 1);
+    assert.equal(store.inspect('drafts')[0].title, '');
+
     const updated = await owner.request(`/api/drafts/${draftId}`, {
       method: 'PUT',
-      body: { clientVersion: 3, expectedRevision: 1, snapshot: validSnapshot({ title: '第二版测试投稿' }) }
+      body: { clientVersion: 4, expectedRevision: 1, snapshot: validSnapshot({ title: '第二版测试投稿' }) }
     });
     assert.equal(updated.data.draft.revision, 2);
 
     const stale = await owner.request(`/api/drafts/${draftId}`, {
       method: 'PUT',
-      body: { clientVersion: 3, expectedRevision: 1, snapshot: validSnapshot({ title: '过期页面修改' }) }
+      body: { clientVersion: 4, expectedRevision: 1, snapshot: validSnapshot({ title: '过期页面修改' }) }
     });
     assert.equal(stale.status, 409);
     assert.equal(stale.data.conflict.revision, 2);
@@ -189,11 +213,11 @@ test('draft submission, requested changes, resubmission and approval form one co
 
     const draft = await student.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, draftKey: 'new:fixture_submit_001', targetType: 'new', snapshot: validSnapshot() }
+      body: { clientVersion: 4, draftKey: 'new:fixture_submit_001', targetType: 'new', snapshot: validSnapshot() }
     });
     const draftId = draft.data.draft.id;
     const submitted = await student.request(`/api/drafts/${draftId}/submit`, {
-      method: 'POST', body: { clientVersion: 3, expectedRevision: 1 }
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
     });
     assert.deepEqual(submitted.data, { ok: true, id: draftId, slug: null, status: 'pending' });
     assert.equal(store.inspect('drafts').length, 0);
@@ -212,11 +236,11 @@ test('draft submission, requested changes, resubmission and approval form one co
 
     const revisionDraft = await student.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, targetType: 'submission', targetId: draftId, snapshot: validSnapshot({ title: '补充后的测试投稿' }) }
+      body: { clientVersion: 4, targetType: 'submission', targetId: draftId, snapshot: validSnapshot({ title: '补充后的测试投稿' }) }
     });
     const revisionDraftId = revisionDraft.data.draft.id;
     const resubmitted = await student.request(`/api/drafts/${revisionDraftId}/submit`, {
-      method: 'POST', body: { clientVersion: 3, expectedRevision: 1 }
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
     });
     assert.equal(resubmitted.data.status, 'pending');
     assert.equal(store.inspect('submissions')[0].review_note, '');
@@ -227,6 +251,10 @@ test('draft submission, requested changes, resubmission and approval form one co
     assert.equal(approved.status, 200);
     assert.equal(approved.data.status, 'approved');
     assert.equal(store.inspect('articles').length, 1);
+    const publicBootstrap = await client().request('/api/bootstrap?refresh=1');
+    assert.equal(publicBootstrap.data.articles[0].title, '补充后的测试投稿');
+    const publicArticle = await client().request(`/api/articles/${encodeURIComponent(approved.data.slug)}?refresh=1`);
+    assert.equal(publicArticle.data.article.title, '补充后的测试投稿');
     assert.equal(store.inspect('review_events').filter(event => event.submission_id === draftId).length, 2);
     assert.ok(store.inspect('contributors').find(item => item.student_id === STUDENT_ID)?.approved_at);
     assert.equal((await reviewer.request(`/api/review/${draftId}`, { method: 'POST', body: { action: 'approve' } })).status, 409);
@@ -322,7 +350,7 @@ test('database failures return bounded errors without leaking internal messages'
     const unavailable = Object.assign(new Error('secret upstream address'), {
       name: 'CloudBasePgError', code: 'UPSTREAM_UNAVAILABLE', status: 503
     });
-    store.failNext('getDocument', 'users', unavailable);
+    store.failNext('queryDocuments', 'users', unavailable);
     const loginFailure = await browser.login(STUDENT_ID);
     assert.equal(loginFailure.status, 503);
     assert.equal(loginFailure.data.error, '数据库当前请求过多，请稍后重试');

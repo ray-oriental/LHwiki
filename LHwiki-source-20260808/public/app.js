@@ -1,30 +1,22 @@
 import { formatDate } from './date.js';
 import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
-import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260823-v086';
+import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260907-v087';
 import { changelogPage } from './changelog.js?v=20260822-v084';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
 
-const MAINTENANCE_MODE = true;
+const MAINTENANCE_MODE = false;
 const MAINTENANCE_REVIEW_DATE = '2026年9月7日';
-const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, visitCount: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
+const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
 const loginDialog = document.querySelector('#login-dialog');
 const statusLabels = { pending: '等待审核', changes_requested: '需修改', approved: '已发布', rejected: '未采用' };
-const CACHE_VERSION = '20260811-visit-batching';
+const CACHE_VERSION = '20260907-manual-cloud-save';
 const BOOTSTRAP_CACHE_KEY = `lhwiki:bootstrap:${CACHE_VERSION}`;
 const SESSION_CACHE_KEY = `lhwiki:session:${CACHE_VERSION}`;
-const VISIT_BROWSER_KEY = 'lhwiki:visit:browser';
-const VISIT_PENDING_KEY = 'lhwiki:visit:pending';
-const VISIT_BATCH_KEY = 'lhwiki:visit:batch';
-const VISIT_TOTAL_KEY = 'lhwiki:visit:total';
 const MAINTENANCE_LOCAL_USER_KEY = 'lhwiki:maintenance-local-user';
 const BOOTSTRAP_TTL = 6 * 60 * 60_000;
 const SESSION_TTL = 12 * 60 * 60_000;
-const VISIT_TOTAL_TTL = 6 * 60 * 60_000;
-const VISIT_FLUSH_DELAY = 20_000;
-const VISIT_BATCH_MAX = 20;
-let visitFlushTimer = null;
 let baseTeachers = null;
 
 async function ensureTeachers() {
@@ -471,7 +463,7 @@ async function resolveWritingContext() {
     };
   }
   const current = route();
-  const { drafts } = await api('/api/drafts/mine');
+  const { drafts, submissions = [] } = await api('/api/mine');
   state.drafts = drafts;
   if (current.page === 'admin-article-edit') {
     if (state.user?.role !== 'admin') throw new Error('需要管理员权限');
@@ -498,7 +490,6 @@ async function resolveWritingContext() {
   }
   let submissionId = token.startsWith('submission:') ? token.slice(11) : state.editing?.id;
   if (submissionId) {
-    const { submissions } = await api('/api/submissions/mine');
     const submission = submissions.find(item => item.id === submissionId);
     if (!submission) throw new Error('没有找到这份投稿');
     return { targetType: 'submission', targetId: submission.id, source: submission, draft: drafts.find(item => item.draftKey === `submission:${submission.id}`), isArticleEdit: false };
@@ -513,7 +504,7 @@ async function resolveWritingContext() {
 
 async function contributePage() {
   if (!state.user && !MAINTENANCE_MODE) {
-    shell(`<header class="page-heading"><span class="eyebrow">参与共建</span><h1>分享一段值得留下的经历</h1><p>无需 GitHub，也无需学习 Markdown。</p></header><div class="form-card empty"><p>登入后即可开始撰写；内容会自动保存为仅你可见的草稿。</p><button class="button primary" data-login>用学号登入</button></div>`);
+    shell(`<header class="page-heading"><span class="eyebrow">参与共建</span><h1>分享一段值得留下的经历</h1><p>无需 GitHub，也无需学习 Markdown。</p></header><div class="form-card empty"><p>登入后即可开始撰写；编辑内容会自动保存在本机，云端同步由你手动触发。</p><button class="button primary" data-login>用学号登入</button></div>`);
     return;
   }
   shell('<div class="empty">正在打开写作页…</div>');
@@ -521,7 +512,7 @@ async function contributePage() {
     const context = await resolveWritingContext();
     const initial = snapshotFromSource(context.source, context.draft ? null : state.contributionPreset);
     const title = context.localOnly ? '本机写作页' : context.isArticleEdit ? `编辑《${esc(initial.title)}》` : context.isReviewEdit ? `校订《${esc(initial.title)}》` : context.targetType === 'submission' ? '继续修改这份投稿' : '把经历写具体';
-    shell(`<header class="page-heading writing-heading"><span class="eyebrow">${context.localOnly ? 'LOCAL WRITING MODE' : context.isArticleEdit ? '管理已发布内容' : context.isReviewEdit ? '管理员校订待审核稿件' : context.targetType === 'submission' ? '修改后重新审核' : '自动保存的写作页'}</span><h1>${title}</h1><p>${context.localOnly ? '编辑器可正常使用，内容只保存在当前浏览器；云端保存与提交将在维护结束后恢复。' : context.isReviewEdit ? '修改会保存回原待审核稿件，并继续留在审核队列，不会自动发布。' : '直接写下内容即可。按 Enter 新建段落，输入 / 切换格式，系统会自动保存。'}</p></header>
+    shell(`<header class="page-heading writing-heading"><span class="eyebrow">${context.localOnly ? 'LOCAL WRITING MODE' : context.isArticleEdit ? '管理已发布内容' : context.isReviewEdit ? '管理员校订待审核稿件' : context.targetType === 'submission' ? '修改后重新审核' : '本机自动保存的写作页'}</span><h1>${title}</h1><p>${context.localOnly ? '编辑器可正常使用，内容只保存在当前浏览器；云端保存与提交将在维护结束后恢复。' : context.isReviewEdit ? '修改会保存回原待审核稿件，并继续留在审核队列，不会自动发布。' : '编辑内容会自动保存在本机；需要跨设备保留时，请点击“立即保存”同步云端。'}</p></header>
       <form class="writing-layout" id="contribution-form">
         <section class="writing-paper">
           <div class="notice compact">${context.localOnly ? '本机编辑不会访问数据库。刷新后会自动恢复这台设备上最近保存的草稿；请勿清除浏览器网站数据。' : '学号只用于校内成员筛选和保存投稿记录，不会出现在公开内容或审核队列中。'}</div>
@@ -534,7 +525,7 @@ async function contributePage() {
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
         </section>
-        <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>准备自动保存</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，自动保存已经暂停。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>${context.localOnly ? '只清除这台设备上的本机草稿' : '清除本机与云端尚未提交的内容'}</small></div><p class="form-error" data-form-error></p></aside>
+        <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>本机自动保存已就绪</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，请选择要保留的版本。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存到云端</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>${context.localOnly ? '只清除这台设备上的本机草稿' : '清除本机与云端尚未提交的内容'}</small></div><p class="form-error" data-form-error></p></aside>
         <dialog class="preview-dialog" id="preview-dialog"><div class="preview-head"><strong>投稿预览</strong><button type="button" class="icon-button" data-close-preview aria-label="关闭预览">×</button></div><article class="prose" id="preview-prose"></article></dialog>
         <dialog class="preview-dialog markdown-dialog" id="markdown-dialog"><div class="preview-head"><strong>Markdown 输入与输出</strong><button type="button" class="icon-button" data-markdown-close aria-label="关闭 Markdown 面板">×</button></div><p class="muted">支持标题、引用、列表、表格、公式、分隔线和安全的行内格式。分栏与折叠块会以 LHwiki 扩展代码块无损保留。</p><label>Markdown 正文<textarea class="markdown-source" data-markdown-source spellcheck="false"></textarea></label><div class="form-actions"><button type="button" class="button" data-markdown-export>从当前正文生成</button><button type="button" class="button" data-markdown-copy>复制</button><button type="button" class="button primary" data-markdown-import>导入并替换正文</button></div></dialog>
       </form>`);
@@ -637,7 +628,7 @@ function bindEditorExperience(context, initial) {
     catch { markdownSource.select(); toast('无法自动复制，请使用系统复制命令'); }
   });
   markdownDialog.querySelector('[data-markdown-import]').addEventListener('click', () => {
-    if (!confirm('导入会替换当前正文，并由自动保存记录新版本。是否继续？')) return;
+    if (!confirm('导入会替换当前正文，并自动记录在本机。是否继续？')) return;
     editor.setBlocks(parseMarkdown(markdownSource.value), { focus: true });
     const importedStats = editor.stats();
     document.querySelector('[data-character-count]').textContent = importedStats.characters;
@@ -754,115 +745,6 @@ function thanksPage() {
     ${visitCounter()}`;
 }
 
-function visitBrowserId() {
-  try {
-    let id = localStorage.getItem(VISIT_BROWSER_KEY);
-    if (!id) {
-      id = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      localStorage.setItem(VISIT_BROWSER_KEY, id);
-    }
-    return id;
-  } catch {
-    return `ephemeral_${Math.random().toString(36).slice(2)}`;
-  }
-}
-
-function makeVisitId() {
-  const nonce = globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  return `view_${visitBrowserId()}_${nonce}`.replaceAll('.', '_').slice(0, 96);
-}
-
-function showVisitCount() {
-  const element = document.querySelector('[data-visit-count]');
-  if (element && Number.isSafeInteger(state.visitCount)) element.textContent = state.visitCount.toLocaleString('zh-CN');
-}
-
-function readPendingVisits() {
-  try {
-    const value = Number(localStorage.getItem(VISIT_PENDING_KEY));
-    return Number.isSafeInteger(value) && value > 0 ? value : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function scheduleVisitFlush(delay = VISIT_FLUSH_DELAY) {
-  if (visitFlushTimer) clearTimeout(visitFlushTimer);
-  visitFlushTimer = setTimeout(() => {
-    visitFlushTimer = null;
-    void flushPendingVisits();
-  }, delay);
-}
-
-function readVisitBatch() {
-  try {
-    const batch = JSON.parse(localStorage.getItem(VISIT_BATCH_KEY) || 'null');
-    return batch && /^[A-Za-z0-9_-]{16,96}$/.test(batch.visitId)
-      && Number.isSafeInteger(batch.count) && batch.count >= 1 && batch.count <= VISIT_BATCH_MAX
-      ? batch : null;
-  } catch {
-    return null;
-  }
-}
-
-async function flushPendingVisits({ drain = false } = {}) {
-  let batch = readVisitBatch();
-  if (!batch) {
-    const pending = readPendingVisits();
-    if (!pending) return;
-    batch = { visitId: makeVisitId(), count: Math.min(pending, VISIT_BATCH_MAX) };
-    try {
-      localStorage.setItem(VISIT_BATCH_KEY, JSON.stringify(batch));
-      localStorage.setItem(VISIT_PENDING_KEY, String(pending - batch.count));
-    } catch { /* private mode falls back to one in-memory request */ }
-  }
-  try {
-    await api('/api/visits', { method: 'POST', body: batch });
-    try { localStorage.removeItem(VISIT_BATCH_KEY); } catch { /* storage may be unavailable */ }
-    if (Number.isSafeInteger(state.visitCount)) {
-      state.visitCount += batch.count;
-      writeCache(localStorage, VISIT_TOTAL_KEY, state.visitCount);
-      showVisitCount();
-    }
-    if (readPendingVisits() > 0) {
-      if (drain) return flushPendingVisits({ drain: true });
-      scheduleVisitFlush();
-    }
-  } catch {
-    scheduleVisitFlush(VISIT_FLUSH_DELAY * 3);
-  }
-}
-
-function recordVisit() {
-  const cachedTotal = readCache(localStorage, VISIT_TOTAL_KEY, VISIT_TOTAL_TTL);
-  if (Number.isSafeInteger(cachedTotal) && cachedTotal >= 0) state.visitCount = cachedTotal;
-  showVisitCount();
-  try {
-    localStorage.setItem(VISIT_PENDING_KEY, String(readPendingVisits() + 1));
-  } catch {
-    void api('/api/visits', { method: 'POST', body: { visitId: makeVisitId(), count: 1 } }).catch(() => {});
-    return;
-  }
-  scheduleVisitFlush();
-}
-
-async function refreshVisitCount({ force = false } = {}) {
-  const cached = readCache(localStorage, VISIT_TOTAL_KEY, VISIT_TOTAL_TTL);
-  if (!force && Number.isSafeInteger(cached) && cached >= 0) {
-    state.visitCount = cached;
-    showVisitCount();
-    return;
-  }
-  try {
-    const data = await api('/api/visits');
-    const total = Number(data.total);
-    if (!Number.isSafeInteger(total) || total < 0) return;
-    state.visitCount = total;
-    writeCache(localStorage, VISIT_TOTAL_KEY, total);
-    showVisitCount();
-  } catch { /* the counter is decorative and must never block the page */ }
-}
-
 function renderBlocks(container, blocks = [], { anchors = false } = {}) {
   const headings = [];
   const usedIds = new Set();
@@ -954,14 +836,10 @@ async function minePage() {
   if (!state.user) { loginDialog.showModal(); location.hash = '#/'; return; }
   shell(`<div class="empty">正在读取你的投稿…</div>`);
   try {
-    const [{ submissions }, { drafts }, { teacherSubmissions = [] }] = await Promise.all([
-      api('/api/submissions/mine'),
-      api('/api/drafts/mine'),
-      api('/api/teacher-submissions/mine')
-    ]);
+    const { submissions, drafts, teacherSubmissions = [] } = await api('/api/mine');
     state.drafts = drafts;
     shell(`<header class="page-heading"><span class="eyebrow">My contributions</span><h1>我的投稿</h1><p>继续草稿，或查看已经进入审核流程的内容。</p><button class="button primary" type="button" data-new-draft>新建一篇</button></header>
-      <div class="section-heading compact-heading"><div><h2>草稿</h2><p>只对你可见，写作过程中会自动保存。</p></div></div>
+      <div class="section-heading compact-heading"><div><h2>草稿</h2><p>本机自动保留编辑内容；点击保存后才同步云端。</p></div></div>
       ${drafts.length ? `<div class="draft-list">${drafts.map(item => `<article class="draft-row"><div><div class="meta"><span>${item.targetType === 'article' ? '公开文章修改' : item.targetType === 'submission' ? '投稿修改' : '新投稿'}</span><span>云端版本 ${item.revision}</span><span>${date(item.updatedAt)}</span></div><h3>${esc(item.title || '未命名草稿')}</h3><p>${esc(item.summary || '还没有填写摘要')}</p></div><div class="draft-actions"><a class="button small" href="#/contribute/${encodeURIComponent(`draft:${item.id}`)}">继续写</a><button class="button small danger" type="button" data-delete-draft="${esc(item.id)}" data-draft-key="${esc(item.draftKey)}">删除</button></div></article>`).join('')}</div>` : '<div class="empty compact-empty">暂时没有草稿。</div>'}
       <div class="section-heading compact-heading"><div><h2>已提交</h2><p>查看审核进度和修改建议。</p></div></div>
       ${submissions.length ? `<div class="article-list">${submissions.map((item, index) => `<div class="article-row"><div><div class="meta"><span class="status ${item.status}">${statusLabels[item.status]}</span><span>#${item.id}</span><span>${date(item.updated_at)}</span></div><h3>${esc(item.title)}</h3><p>${esc(item.summary)}</p>${item.review_note ? `<div class="notice warn"><strong>审核意见：</strong>${esc(item.review_note)}</div>` : ''}</div><div><span class="tag">${esc(item.content_type)}</span>${['pending','changes_requested'].includes(item.status) ? `<button class="button small" style="margin-top:10px" data-edit-index="${index}">继续编辑</button>` : ''}</div></div>`).join('')}</div>` : `<div class="empty"><span class="emoji">✎</span>还没有文章投稿。<br><a href="#/contribute" class="button primary" style="margin-top:14px">写第一篇</a></div>`}
@@ -1018,6 +896,7 @@ function renderReviewDetail(item) {
     const note = detail.querySelector('textarea').value;
     try {
       await api(`/api/review/${item.id}`, { method: 'POST', body: { action: button.dataset.action, note } });
+      if (button.dataset.action === 'approve') await loadBootstrap(true);
       toast(button.dataset.action === 'approve' ? '内容已发布' : '审核结果已保存');
       reviewPage();
       await refreshBootstrap();
@@ -1033,6 +912,7 @@ function renderTeacherReviewDetail(item) {
     const note = detail.querySelector('textarea').value;
     try {
       await api(`/api/review/teachers/${encodeURIComponent(item.id)}`, { method: 'POST', body: { action: button.dataset.teacherAction, note } });
+      if (button.dataset.teacherAction === 'approve') await loadBootstrap(true);
       toast(button.dataset.teacherAction === 'approve' ? '教师已加入索引' : '审核结果已保存');
       await refreshBootstrap();
       reviewPage();
