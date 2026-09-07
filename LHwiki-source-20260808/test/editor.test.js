@@ -255,10 +255,10 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
   assert.match(html, /20260822-v085/);
-  assert.match(app, /draft-manager\.js\?v=20260823-v086/);
+  assert.match(app, /draft-manager\.js\?v=20260907-v087/);
   assert.match(app, /data-markdown-open/);
   assert.match(html, /theme\.js\?v=20260822-v085/);
-  assert.match(html, /app\.js\?v=20260823-v086/);
+  assert.match(html, /app\.js\?v=20260907-v087/);
   assert.match(css, /:root\[data-theme-effective="dark"\]/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.sidebar-changelog \{ background: linear-gradient/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.teacher-card footer/);
@@ -286,7 +286,6 @@ test('client upgrade conflicts stop cloud retries and preserve the local snapsho
     await manager.saveNow();
     assert.equal(manager.conflicted, true);
     assert.equal(manager.lastState, 'conflict');
-    assert.equal(manager.retryTimer, null);
     assert.equal(manager.snapshot.body[0].text, '本机内容');
     manager.destroy();
   } finally {
@@ -297,7 +296,7 @@ test('client upgrade conflicts stop cloud retries and preserve the local snapsho
   }
 });
 
-test('resource pressure stops automatic cloud retries while preserving local writing', async () => {
+test('resource pressure never schedules a cloud retry and preserves local writing', async () => {
   const originalWindow = globalThis.window;
   const originalLocalStorage = globalThis.localStorage;
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -314,11 +313,49 @@ test('resource pressure stops automatic cloud retries while preserving local wri
     manager.update({ body: [{ id: 'b_12345678', type: 'paragraph', text: '本机内容' }] });
     await manager.saveNow();
     assert.equal(calls, 1);
-    assert.equal(manager.autoRetryBlocked, true);
-    assert.equal(manager.retryTimer, null);
-    await manager.saveNow({ automatic: true });
+    manager.update({ body: [{ id: 'b_12345678', type: 'paragraph', text: '继续本机编辑' }] });
+    await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(calls, 1);
-    assert.equal(manager.snapshot.body[0].text, '本机内容');
+    assert.equal(manager.snapshot.body[0].text, '继续本机编辑');
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('first manual save of a basic draft uses one cloud request', async () => {
+  const calls = [];
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem() {}, setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({
+      api: async (path, options) => {
+        calls.push([path, options.method]);
+        return { draft: {
+          id: 'draft-1', draftKey: 'new:test', targetType: 'new', targetId: null,
+          schemaVersion: 1, sectionSlug: '', contentType: '', title: '本机标题', summary: '',
+          subject: '', authorLabel: '', anonymous: false,
+          body: [{ id: 'b_12345678', type: 'paragraph', text: '正文' }],
+          revision: 1, updatedAt: new Date().toISOString()
+        } };
+      },
+      userId: '202600043',
+      draftKey: 'new:test'
+    });
+    manager.update({
+      schemaVersion: 2, sectionSlug: '', contentType: '', title: '本机标题', summary: '',
+      subject: '', authorLabel: '', anonymous: false,
+      body: [{ id: 'b_12345678', type: 'paragraph', text: '正文' }]
+    });
+    await manager.saveNow();
+    assert.deepEqual(calls, [['/api/drafts', 'POST']]);
     manager.destroy();
   } finally {
     globalThis.window = originalWindow;

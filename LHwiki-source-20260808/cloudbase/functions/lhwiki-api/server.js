@@ -7,9 +7,8 @@ const { createApp } = require('./api-app.cjs');
 const { createPgStore } = require('./pg-store.cjs');
 const { loadPublicSnapshot } = require('./public-snapshot.cjs');
 
-const VISIT_TRACKING_ENABLED = false;
-const DRAFT_CLIENT_VERSION = 3;
-const EMERGENCY_MAINTENANCE = true;
+const DRAFT_CLIENT_VERSION = 4;
+const EMERGENCY_MAINTENANCE = false;
 const MAINTENANCE_REVIEW_DATE = '2026-09-07';
 
 function loadSeed() {
@@ -37,7 +36,6 @@ function createProductionApp(env = process.env) {
     adminBootstrapCode: env.ADMIN_BOOTSTRAP_CODE,
     reviewerAccessCode: env.REVIEWER_ACCESS_CODE,
     region: env.TENCENTCLOUD_REGION || 'ap-shanghai',
-    visitTrackingEnabled: VISIT_TRACKING_ENABLED,
     draftClientVersion: DRAFT_CLIENT_VERSION,
     emergencyMaintenance: EMERGENCY_MAINTENANCE,
     maintenanceReviewDate: MAINTENANCE_REVIEW_DATE
