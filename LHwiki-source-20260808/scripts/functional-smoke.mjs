@@ -1,7 +1,14 @@
-const origin = (process.env.LHWIKI_ORIGIN || 'https://lhwiki-d9g6r8vfzc7be1c0a-1465088461.ap-shanghai.app.tcloudbase.com').replace(/\/$/, '');
+const productionOrigins = new Set([
+  'https://lhwiki-d9g6r8vfzc7be1c0a-1465088461.ap-shanghai.app.tcloudbase.com',
+  'https://lhwiki-lhwiki-d9g6r8vfzc7be1c0a.webapps.tcloudbase.com'
+]);
+const origin = (process.env.LHWIKI_ORIGIN || 'http://127.0.0.1:9000').replace(/\/$/, '');
 const studentId = process.env.LHWIKI_SMOKE_LOGIN_ID;
 const draftClientVersion = 4;
 if (!studentId) throw new Error('Set LHWIKI_SMOKE_LOGIN_ID to an authorized test account');
+if (productionOrigins.has(origin) && process.env.LHWIKI_ALLOW_PRODUCTION_WRITES !== 'I_UNDERSTAND_THIS_WRITES_PRODUCTION') {
+  throw new Error('Production functional smoke is write-capable and disabled by default; use local integration tests instead');
+}
 
 let cookie = '';
 async function request(path, options = {}) {

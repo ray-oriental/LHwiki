@@ -6,6 +6,7 @@ import test from 'node:test';
 const require = createRequire(import.meta.url);
 const cloudbaseContent = require('../cloudbase/functions/lhwiki-api/content.cjs');
 const { PRIMARY_KEYS, createPgStore } = require('../cloudbase/functions/lhwiki-api/pg-store.cjs');
+const { createPublicSnapshotStore } = require('../cloudbase/functions/lhwiki-api/public-snapshot-store.cjs');
 const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
 
 async function readApiSource() {
@@ -51,12 +52,17 @@ test('生产稳定性巡检有明确的低并发和总请求预算', async () =>
   assert.match(source, /Math\.min\(4, Number\(process\.env\.LHWIKI_CONCURRENCY \|\| 2\)\)/);
   assert.match(source, /Math\.min\(5, Number\(process\.env\.LHWIKI_ROUNDS \|\| 2\)\)/);
   assert.match(source, /requestBudget > 30/);
+  const quickBaseline = source.slice(source.indexOf('const quickBaseline'), source.indexOf('const requestBudget'));
+  assert.doesNotMatch(quickBaseline, /\/api\/bootstrap/);
+  assert.match(source, /queue\.push\(\[origin, '\/api\/health', 'json'\]\)/);
 });
 
 test('生产写作冒烟使用当前草稿协议版本', async () => {
   const source = await readFile(new URL('../scripts/functional-smoke.mjs', import.meta.url), 'utf8');
   assert.match(source, /const draftClientVersion = 4/);
   assert.equal((source.match(/clientVersion: draftClientVersion/g) || []).length, 2);
+  assert.match(source, /process\.env\.LHWIKI_ORIGIN \|\| 'http:\/\/127\.0\.0\.1:9000'/);
+  assert.match(source, /LHWIKI_ALLOW_PRODUCTION_WRITES !== 'I_UNDERSTAND_THIS_WRITES_PRODUCTION'/);
 });
 
 test('CloudBase PostgreSQL adapter defines a stable primary key for every table', () => {
@@ -99,6 +105,40 @@ test('public seed fallback is independent from private migration data', () => {
   });
   assert.ok(snapshot.articles.length > 0);
   assert.ok(snapshot.articles.every(article => Array.isArray(article.body)));
+});
+
+test('public snapshot storage validates downloads and overwrites one fixed object', async () => {
+  const snapshot = validatePublicSnapshot({
+    schemaVersion: 1,
+    generatedAt: '2030-01-02T03:04:05.000Z',
+    sections: [{ slug: 'start', title: '开始', description: '测试', icon: '书', sort_order: 1 }],
+    articles: [], contributors: [], teacherAdditions: []
+  });
+  const calls = [];
+  const response = (status, data) => ({ ok: status >= 200 && status < 300, status, text: async () => typeof data === 'string' ? data : JSON.stringify(data) });
+  const store = createPublicSnapshotStore({
+    envId: 'example-env',
+    apiKey: 'server-key',
+    publicUrl: 'https://storage.example/public-snapshot.json',
+    validate: validatePublicSnapshot,
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body });
+      if (String(url) === 'https://storage.example/public-snapshot.json') return response(200, snapshot);
+      if (String(url).endsWith('/v1/storages/get-objects-upload-info')) return response(200, [{
+        uploadUrl: 'https://upload.example/object', authorization: 'signed-upload', token: 'temporary-token', cloudObjectMeta: 'object-meta'
+      }]);
+      if (String(url) === 'https://upload.example/object') return response(200, '');
+      return response(404, { code: 'NOT_FOUND' });
+    }
+  });
+  assert.deepEqual(await store.load(), snapshot);
+  assert.deepEqual(await store.save(snapshot), snapshot);
+  assert.equal(calls[1].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].body), [{ objectId: 'lhwiki-system/public-snapshot.json' }]);
+  assert.equal(calls[1].headers.authorization, 'Bearer server-key');
+  assert.equal(calls[2].method, 'PUT');
+  assert.equal(calls[2].headers.authorization, 'signed-upload');
+  assert.deepEqual(JSON.parse(calls[2].body), snapshot);
 });
 
 test('PostgreSQL adapter opens a 503 circuit at the per-instance request budget', async () => {

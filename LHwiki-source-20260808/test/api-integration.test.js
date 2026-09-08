@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const { createApp } = require('../cloudbase/functions/lhwiki-api/api-app.cjs');
+const { fromBackup } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
 const { createMemoryStore } = require('./helpers/memory-store.cjs');
 
 const SESSION_SECRET = 'lhwiki-local-integration-session-secret-0001';
@@ -258,6 +259,42 @@ test('draft submission, requested changes, resubmission and approval form one co
     assert.equal(store.inspect('review_events').filter(event => event.submission_id === draftId).length, 2);
     assert.ok(store.inspect('contributors').find(item => item.student_id === STUDENT_ID)?.approved_at);
     assert.equal((await reviewer.request(`/api/review/${draftId}`, { method: 'POST', body: { action: 'approve' } })).status, 409);
+  });
+});
+
+test('approval publishes an allowlisted persistent snapshot without changing the review workflow', async () => {
+  let remoteSnapshot = fromBackup({
+    formatVersion: 1,
+    exportedAt: new Date(FIXED_TIME - 1000).toISOString(),
+    data: { sections: fixtureData().sections, articles: [], contributors: [], teacher_additions: [] }
+  });
+  let saves = 0;
+  const publicSnapshotStore = {
+    async load() { return structuredClone(remoteSnapshot); },
+    async save(snapshot) { saves += 1; remoteSnapshot = structuredClone(snapshot); return snapshot; }
+  };
+  const buildPublicSnapshot = data => fromBackup({ formatVersion: 1, exportedAt: new Date(FIXED_TIME).toISOString(), data });
+  await useHarness({ appOptions: { publicSnapshotStore, buildPublicSnapshot } }, async ({ client }) => {
+    const student = client();
+    const reviewer = client();
+    await student.login(STUDENT_ID);
+    await reviewer.login(REVIEWER_ID);
+    const draft = await student.request('/api/drafts', {
+      method: 'POST', body: { clientVersion: 4, draftKey: 'new:persistent_snapshot', targetType: 'new', snapshot: validSnapshot() }
+    });
+    await student.request(`/api/drafts/${draft.data.draft.id}/submit`, {
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
+    });
+    const approved = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', body: { action: 'approve', note: '' }
+    });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.data.publicSnapshotSynced, true);
+    assert.equal(saves, 1);
+    assert.equal(remoteSnapshot.articles.length, 1);
+    assert.deepEqual(Object.keys(remoteSnapshot.articles[0]).sort(), ['author_label', 'body', 'content_type', 'published_at', 'section_slug', 'slug', 'subject', 'summary', 'title', 'updated_at'].sort());
+    const publicArticle = await client().request(`/api/articles/${encodeURIComponent(approved.data.slug)}?refresh=1`);
+    assert.equal(publicArticle.data.article.title, '完整测试投稿');
   });
 });
 

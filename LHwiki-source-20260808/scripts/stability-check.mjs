@@ -51,8 +51,7 @@ const fullBaseline = [
 const quickBaseline = [
   ['/', 'html'],
   ['/app.js', 'script'],
-  ['/api/health', 'json'],
-  ['/api/bootstrap', 'json']
+  ['/api/health', 'json']
 ];
 
 const requestBudget = quick ? origins.length * quickBaseline.length : origins.length * (fullBaseline.length + rounds);
@@ -63,7 +62,7 @@ for (const origin of origins) {
 }
 
 const queue = [];
-if (!quick) for (const origin of origins) for (let index = 0; index < rounds; index += 1) queue.push([origin, '/api/bootstrap', 'json']);
+if (!quick) for (const origin of origins) for (let index = 0; index < rounds; index += 1) queue.push([origin, '/api/health', 'json']);
 for (let offset = 0; offset < queue.length; offset += concurrency) {
   results.push(...await Promise.all(queue.slice(offset, offset + concurrency).map(args => probe(...args))));
 }

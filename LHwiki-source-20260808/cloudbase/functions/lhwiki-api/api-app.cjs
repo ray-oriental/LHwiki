@@ -25,6 +25,8 @@ function createApp({
   store,
   seed = { sections: [], articles: [] },
   publicSnapshot = { sections: [], articles: [], contributors: [], teacherAdditions: [] },
+  publicSnapshotStore = null,
+  buildPublicSnapshot = null,
   sessionSecret = '',
   adminBootstrapCode = '',
   reviewerAccessCode = '',
@@ -49,6 +51,8 @@ function createApp({
   let seedPromise;
   let publicCache = null;
   let publicCachePromise = null;
+  let publicSnapshotLoadedAt = null;
+  let publicSnapshotPromise = null;
   let privilegedLoginCache = null;
   let privilegedLoginPromise = null;
   const articleCache = new Map();
@@ -70,11 +74,11 @@ function invalidatePublicCache() {
   articleCache.clear();
 }
 
-function snapshotBootstrap() {
-  const sections = publicSnapshot.sections.slice();
-  const articles = publicSnapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
-  const contributors = publicSnapshot.contributors.slice();
-  const teacherAdditions = publicSnapshot.teacherAdditions.slice();
+function snapshotBootstrap(snapshot = publicSnapshot) {
+  const sections = snapshot.sections.slice();
+  const articles = snapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
+  const contributors = snapshot.contributors.slice();
+  const teacherAdditions = snapshot.teacherAdditions.slice();
   sections.sort((a, b) => a.sort_order - b.sort_order);
   sortByDate(articles, 'published_at');
   return {
@@ -85,10 +89,30 @@ function snapshotBootstrap() {
   };
 }
 
+async function readStoredPublicSnapshot(force = false) {
+  if (!publicSnapshotStore?.load) return null;
+  if (!force && publicSnapshotLoadedAt !== null && clock() - publicSnapshotLoadedAt < PUBLIC_CACHE_TTL) return publicSnapshot;
+  if (!publicSnapshotPromise) publicSnapshotPromise = (async () => {
+    try {
+      publicSnapshot = await publicSnapshotStore.load();
+    } catch (err) {
+      logger.error?.(`public-snapshot-download-fallback:${safeDiagnostic(err)}`);
+    }
+    publicSnapshotLoadedAt = clock();
+    return publicSnapshot;
+  })().finally(() => { publicSnapshotPromise = null; });
+  return publicSnapshotPromise;
+}
+
 async function readPublicBootstrap(force = false) {
   if (!force && publicCache && clock() - publicCache.savedAt < PUBLIC_CACHE_TTL) return publicCache.value;
   if (!publicCachePromise) publicCachePromise = (async () => {
     let value;
+    if (publicSnapshotStore?.load) {
+      value = snapshotBootstrap(await readStoredPublicSnapshot(force));
+      publicCache = { savedAt: clock(), value };
+      return value;
+    }
     try {
       const [sections, articles, contributors, teacherAdditions] = await Promise.all([
         queryDocuments('sections', null, 100, 'slug,title,description,icon,sort_order'),
@@ -118,6 +142,14 @@ async function readPublicArticle(slug, force = false) {
   const cached = articleCache.get(slug);
   if (!force && cached && clock() - cached.savedAt < ARTICLE_CACHE_TTL) return cached.value;
   let value;
+  if (publicSnapshotStore?.load) {
+    const snapshot = await readStoredPublicSnapshot(force);
+    const article = snapshot.articles.find(item => item.slug === slug);
+    value = article ? { ...article, body_json: JSON.stringify(article.body) } : null;
+    articleCache.set(slug, { savedAt: clock(), value });
+    if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
+    return value;
+  }
   try {
     value = withoutId(await getDocument('articles', slug));
   } catch (err) {
@@ -128,6 +160,33 @@ async function readPublicArticle(slug, force = false) {
   articleCache.set(slug, { savedAt: clock(), value });
   if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
   return value;
+}
+
+async function syncPublicSnapshot(reason) {
+  if (!publicSnapshotStore?.save || typeof buildPublicSnapshot !== 'function') {
+    invalidatePublicCache();
+    return null;
+  }
+  try {
+    const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+      queryDocuments('sections', null, 100),
+      queryDocuments('articles', null, 2000),
+      queryDocuments('contributors', null, 2000),
+      queryDocuments('teacher_additions', null, 500)
+    ]);
+    const nextSnapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+    await publicSnapshotStore.save(nextSnapshot);
+    publicSnapshot = nextSnapshot;
+    publicSnapshotLoadedAt = clock();
+    publicCache = { savedAt: clock(), value: snapshotBootstrap(nextSnapshot) };
+    publicCachePromise = null;
+    articleCache.clear();
+    return true;
+  } catch (err) {
+    invalidatePublicCache();
+    logger.error?.(`public-snapshot-sync-failed:${reason}:${safeDiagnostic(err)}`);
+    return false;
+  }
 }
 
 async function ensureSeed() {
@@ -770,6 +829,7 @@ async function route(request) {
     const timestamp = now();
     let id = draft.target_id;
     let slug = null;
+    let publicSnapshotSynced = null;
     if (draft.target_type === 'new') {
       id = draft.id;
       const recent = await queryDocuments('submissions', { student_id: auth.user.student_id });
@@ -794,12 +854,12 @@ async function route(request) {
       if (!article) return error('没有找到这篇已发布内容', 404);
       slug = article.slug;
       await setDocument('articles', article.slug, { ...article, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: timestamp });
-      invalidatePublicCache();
     } else {
       return error('草稿目标无效');
     }
     await deleteDocuments('drafts', { id: draft.id, student_id: auth.user.student_id });
-    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending' });
+    if (draft.target_type === 'article') publicSnapshotSynced = await syncPublicSnapshot('draft-article-publish');
+    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending', ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   if (method === 'GET' && path === '/api/submissions/mine') {
@@ -942,7 +1002,6 @@ async function route(request) {
           approved_at: timestamp
         });
       }
-      invalidatePublicCache();
     }
     const status = action === 'approve' ? 'approved' : 'rejected';
     await setDocument('teacher_submissions', submission.id, {
@@ -953,7 +1012,8 @@ async function route(request) {
       updated_at: timestamp,
       reviewed_at: timestamp
     });
-    return result({ ok: true, status });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('teacher-approval') : null;
+    return result({ ok: true, status, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const reviewMatch = path.match(/^\/api\/review\/([a-zA-Z0-9_-]+)$/);
@@ -984,8 +1044,8 @@ async function route(request) {
     const eventId = randomUUID();
     await setDocument('review_events', eventId, { id: eventId, submission_id: submission.id, reviewer_id: auth.user.student_id, action, note, created_at: now() });
     await setDocument('submissions', submission.id, { ...submission, status: statuses[action], review_note: note, updated_at: now() });
-    if (action === 'approve') invalidatePublicCache();
-    return result({ ok: true, status: statuses[action], slug });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('article-approval') : null;
+    return result({ ok: true, status: statuses[action], slug, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const adminArticleMatch = path.match(/^\/api\/admin\/articles\/(.+)$/);
@@ -999,16 +1059,16 @@ async function route(request) {
     if (!existing) return error('没有找到这篇已发布内容', 404);
     if (method === 'DELETE') {
       await deleteDocument('articles', slug);
-      invalidatePublicCache();
-      return result({ ok: true, slug });
+      const publicSnapshotSynced = await syncPublicSnapshot('admin-article-delete');
+      return result({ ok: true, slug, publicSnapshotSynced });
     }
     const prepared = await validateSubmission(await readJson(request));
     if (prepared.error) return error(prepared.error);
     const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
     const updated = { ...existing, slug, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: now() };
     await setDocument('articles', slug, updated);
-    invalidatePublicCache();
-    return result({ ok: true, article: mapArticle(updated) });
+    const publicSnapshotSynced = await syncPublicSnapshot('admin-article-update');
+    return result({ ok: true, article: mapArticle(updated), publicSnapshotSynced });
   }
 
   if (method === 'GET' && path === '/api/admin/users') {
