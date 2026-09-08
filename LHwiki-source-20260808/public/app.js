@@ -2,7 +2,7 @@ import { formatDate } from './date.js';
 import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260907-v087';
-import { changelogPage } from './changelog.js?v=20260822-v084';
+import { changelogPage } from './changelog.js?v=20260908-v088';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
 
 const MAINTENANCE_MODE = false;
@@ -18,6 +18,7 @@ const MAINTENANCE_LOCAL_USER_KEY = 'lhwiki:maintenance-local-user';
 const BOOTSTRAP_TTL = 6 * 60 * 60_000;
 const SESSION_TTL = 12 * 60 * 60_000;
 let baseTeachers = null;
+let cleanupGameThemeSync = null;
 
 async function ensureTeachers() {
   if (!baseTeachers) ({ TEACHERS: baseTeachers } = await import('./teachers.js?v=20260810-directory-supplement-2'));
@@ -164,6 +165,8 @@ function themeControl() {
 }
 
 function shell(content) {
+  cleanupGameThemeSync?.();
+  cleanupGameThemeSync = null;
   const current = route();
   const roleTools = state.user && ['reviewer', 'admin'].includes(state.user.role)
     ? navLink('#/review', '✓', '审核投稿', ['review', 'admin-review-edit'].includes(current.page)) : '';
@@ -180,6 +183,8 @@ function shell(content) {
       ${navLink('#/thanks', '名', '致谢', current.page === 'thanks')}
       ${state.user ? navLink('#/mine', '◷', '我的投稿', current.page === 'mine') : ''}
       ${roleTools}${adminTools}
+      <div class="nav-label nav-label-secondary">校园小玩意</div>
+      ${navLink('#/game', '游', '合成潞河', current.page === 'game')}
       <div class="side-footer"><p>把经验说具体，也给不同的经历留位置。</p><a href="#/about" class="button small">阅读共建说明</a></div>
       <div class="sidebar-changelog">${navLink('#/changelog', '↻', '更新日志', current.page === 'changelog')}</div>
     </aside>
@@ -197,6 +202,18 @@ function shell(content) {
     </main>
   </div>`;
   bindShell();
+}
+
+function greatLuhePage() {
+  return `<header class="page-heading great-luhe-heading"><span class="eyebrow">CAMPUS LITTLE THING</span><h1>合成潞河</h1><p>把熟悉的校徽合成到潞河。它是一个纯前端小游戏，不会上传内容；进度只保存在当前浏览器。</p></header>
+    <section class="great-luhe-card" aria-labelledby="great-luhe-title">
+      <div class="great-luhe-copy">
+        <div class="great-luhe-card-heading"><div><span class="eyebrow">LOCAL · NO BACKEND</span><h2 id="great-luhe-title">潞河校徽合成小游戏</h2></div><span class="great-luhe-badge">本机运行</span></div>
+        <p>拖动或点击场地投放校徽；同等级校徽相遇后会继续合成。</p>
+        <p class="great-luhe-note">游戏过程完全在你的设备上运行，不会调用 LHwiki 接口。最高分和声音偏好只保存在当前浏览器。</p>
+      </div>
+      <iframe class="great-luhe-frame" src="/games/great-luhe/index.html?theme=system" title="合成潞河小游戏" loading="lazy" sandbox="allow-scripts allow-same-origin" allow="autoplay" referrerpolicy="no-referrer"></iframe>
+    </section>`;
 }
 
 function userControl() {
@@ -248,8 +265,24 @@ function bindShell() {
   document.querySelector('#search')?.addEventListener('input', event => {
     state.search = event.target.value;
     if (route().page !== 'search') history.replaceState(null, '', '#/search');
+    cleanupGameThemeSync?.();
+    cleanupGameThemeSync = null;
     document.querySelector('.content').innerHTML = searchPage();
   });
+  const frame = document.querySelector('.great-luhe-frame');
+  if (frame instanceof HTMLIFrameElement) {
+    const sendTheme = () => frame.contentWindow?.postMessage({
+      type: 'lhwiki-theme-change',
+      theme: window.LHTheme?.effective?.() || 'light'
+    }, location.origin);
+    frame.addEventListener('load', sendTheme, { once: false });
+    window.addEventListener('lhwiki-theme-change', sendTheme);
+    sendTheme();
+    cleanupGameThemeSync = () => {
+      frame.removeEventListener('load', sendTheme);
+      window.removeEventListener('lhwiki-theme-change', sendTheme);
+    };
+  }
 }
 
 function bindTeacherReviewButtons() {
@@ -985,7 +1018,7 @@ async function render() {
   if (current.page === 'review') return reviewPage();
   if (current.page === 'admin') return adminPage();
   if (['contribute', 'admin-article-edit', 'admin-review-edit'].includes(current.page)) return contributePage();
-  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, changelog: changelogPage, search: searchPage };
+  const pages = { home, section: () => sectionPage(current.value), teachers: teacherDirectory, teacher: () => teacherPage(current.value), 'teacher-submit': teacherSubmissionPage, thanks: thanksPage, about: aboutPage, changelog: changelogPage, search: searchPage, game: greatLuhePage };
   shell((pages[current.page] || notFound)());
 }
 
