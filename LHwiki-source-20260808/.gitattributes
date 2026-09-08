@@ -1,0 +1,4 @@
+public/games/great-luhe/assets/index-*.js -whitespace linguist-generated=true
+public/games/great-luhe/assets/index-*.css linguist-generated=true
+public/games/great-luhe/assets/schools/*.png binary
+games/great-luhe/public/assets/schools/*.png binary
