@@ -4,7 +4,7 @@
 
 - `public/`：CloudBase 静态网站托管；
 - `functions/lhwiki-api/`：Node.js 20 HTTP 云函数；
-- CloudBase PostgreSQL：`users`、`sections`、`articles`、`submissions`、`review_events`、`contributors`、`drafts` 七张表；
+- CloudBase PostgreSQL：`users`、`sections`、`articles`、`submissions`、`review_events`、`contributors`、`drafts`、`teacher_submissions`、`teacher_additions` 九张表；
 - 备案自定义域名：同域名下 `/api/*` 进入云函数，其余路径进入静态托管。
 
 ## 最短部署流程
@@ -51,14 +51,14 @@ node .\cloudbase\tools\build-seed.mjs
 
 ## 生成公开内容快照
 
-公共目录和文章不应在浏览请求中唤醒 PostgreSQL。完成一次人工核验的生产备份后，可在受控电脑上用明确路径生成仅含公开字段的快照；脚本会拒绝未批准字段、无效正文和未审核的贡献者/教师补充：
+公共目录采用浏览器端与函数端六小时缓存，并在一次函数激活内并行读取严格白名单字段；文章正文按需单读。部署快照作为数据库故障时的只读回退。完成一次人工核验的生产备份后，可在受控电脑上用明确路径生成快照；脚本会拒绝未批准字段、无效正文和未审核的贡献者/教师补充：
 
 ```powershell
 node .\scripts\build-public-snapshot.mjs 'D:\受控路径\lhwiki-YYYYMMDD-HHmmss.json'
 ```
 
 快照文件只用于部署包，不包含学号、草稿、投稿、审核记录或数据库主键以外的私有字段；不要把备份路径或备份正文提交到公开仓库。
-公开文章或教师补充获批后，下一次面向公众的发布必须重新从经核验备份生成快照；在重新发布前，公共页面继续展示上一份已发布快照，投稿和审核等私有流程不受影响。
+公开文章或教师补充获批后，公共缓存下一次刷新时会读取最新内容；重新生成部署快照用于保持数据库故障回退内容同步，不再是公开更新生效的前置条件。
 
 ## 安全说明
 

@@ -53,6 +53,12 @@ test('生产稳定性巡检有明确的低并发和总请求预算', async () =>
   assert.match(source, /requestBudget > 30/);
 });
 
+test('生产写作冒烟使用当前草稿协议版本', async () => {
+  const source = await readFile(new URL('../scripts/functional-smoke.mjs', import.meta.url), 'utf8');
+  assert.match(source, /const draftClientVersion = 4/);
+  assert.equal((source.match(/clientVersion: draftClientVersion/g) || []).length, 2);
+});
+
 test('CloudBase PostgreSQL adapter defines a stable primary key for every table', () => {
   assert.deepEqual(PRIMARY_KEYS, {
     sections: 'slug',
