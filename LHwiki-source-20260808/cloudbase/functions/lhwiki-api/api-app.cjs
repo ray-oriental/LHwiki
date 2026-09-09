@@ -18,7 +18,7 @@ const {
 const COOKIE = 'campus_session';
 const PUBLIC_CACHE_TTL = 6 * 60 * 60_000;
 const ARTICLE_CACHE_TTL = 6 * 60 * 60_000;
-const PRIVILEGED_LOGIN_CACHE_TTL = 6 * 60 * 60_000;
+const SESSION_ROLES = new Set(['student', 'reviewer', 'admin']);
 const encoder = new TextEncoder();
 
 function createApp({
@@ -53,8 +53,6 @@ function createApp({
   let publicCachePromise = null;
   let publicSnapshotLoadedAt = null;
   let publicSnapshotPromise = null;
-  let privilegedLoginCache = null;
-  let privilegedLoginPromise = null;
   const articleCache = new Map();
   const mutationWindows = new Map();
 
@@ -237,26 +235,8 @@ async function hmac(secret, value) {
 }
 
 async function makeSession(studentId, role, secret) {
-  const payload = b64url(JSON.stringify({ version: 2, studentId, role, exp: clock() + 7 * 86400_000 }));
+  const payload = b64url(JSON.stringify({ version: 3, studentId, role, exp: clock() + 7 * 86400_000 }));
   return `${payload}.${b64url(await hmac(secret, payload))}`;
-}
-
-async function privilegedLoginUsers() {
-  if (privilegedLoginCache && clock() - privilegedLoginCache.savedAt < PRIVILEGED_LOGIN_CACHE_TTL) {
-    return privilegedLoginCache.users;
-  }
-  if (!privilegedLoginPromise) privilegedLoginPromise = (async () => {
-    const rows = await queryDocuments('users', { role: { operator: 'neq', value: 'student' } }, 100);
-    const users = new Map(rows.map(row => [row.student_id, withoutId(row)]));
-    privilegedLoginCache = { savedAt: clock(), users };
-    return users;
-  })().finally(() => { privilegedLoginPromise = null; });
-  return privilegedLoginPromise;
-}
-
-function invalidatePrivilegedLoginCache() {
-  privilegedLoginCache = null;
-  privilegedLoginPromise = null;
 }
 
 function parseCookies(request) {
@@ -280,45 +260,27 @@ async function readSession(request) {
   if (difference !== 0) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!validLoginId(data.studentId) || data.exp < clock()) return null;
-    if (data.version === 2 && data.role === 'student' && data.studentId !== ADMIN_LOGIN_ID) {
-      return {
-        student_id: data.studentId,
-        role: 'student',
-        role_locked: 0,
-        created_at: now(),
-        last_login_at: now()
-      };
-    }
-    const stored = withoutId(await getDocument('users', data.studentId));
-    if (data.studentId !== ADMIN_LOGIN_ID) {
-      return stored ? { ...stored, __persistent: true } : {
-        student_id: data.studentId,
-        role: 'student',
-        role_locked: 0,
-        created_at: now(),
-        last_login_at: now()
-      };
-    }
+    if (![2, 3].includes(Number(data.version)) || !validLoginId(data.studentId) || data.exp < clock() || !SESSION_ROLES.has(data.role)) return null;
     const timestamp = now();
-    const protectedAdmin = {
-      ...stored,
-      student_id: ADMIN_LOGIN_ID,
-      role: 'admin',
+    return {
+      student_id: data.studentId,
+      role: data.studentId === ADMIN_LOGIN_ID ? 'admin' : data.role,
       role_locked: 0,
-      created_at: stored?.created_at || timestamp,
-      last_login_at: stored?.last_login_at || timestamp,
-      __persistent: true
+      created_at: timestamp,
+      last_login_at: timestamp
     };
-    if (!stored || stored.role !== 'admin' || stored.role_locked !== 0) {
-      const persistedAdmin = { ...protectedAdmin };
-      delete persistedAdmin.__persistent;
-      await setDocument('users', ADMIN_LOGIN_ID, persistedAdmin);
-    }
-    return protectedAdmin;
   } catch {
     return null;
   }
+}
+
+async function verifyPrivilegedSession(user) {
+  if (!user || user.role === 'student' || user.student_id === ADMIN_LOGIN_ID) return user;
+  const stored = withoutId(await getDocument('users', user.student_id));
+  if (!stored || stored.role_locked || !['reviewer', 'admin'].includes(stored.role)) {
+    return { ...user, role: 'student', role_locked: stored?.role_locked ? 1 : 0 };
+  }
+  return { ...stored, __persistent: true };
 }
 
 function sessionCookie(value, maxAge = 604800) {
@@ -517,8 +479,12 @@ async function validateDraftTarget(user, targetType, targetId, requestedDraftKey
 }
 
 async function requireUser(request, roles = []) {
-  const user = await readSession(request);
+  let user = await readSession(request);
   if (!user) return { response: error('请先登入', 401) };
+  // Signed student sessions stay database-free. Privileged claims are checked
+  // only when an explicit private operation reaches this guard, so revocation
+  // remains immediate without turning public page loads into PostgreSQL reads.
+  if (user.role !== 'student') user = await verifyPrivilegedSession(user);
   if (roles.length && !roles.includes(user.role)) return { response: error('没有所需权限', 403) };
   return { user };
 }
@@ -646,18 +612,19 @@ async function route(request) {
     const data = await readJson(request);
     const studentId = normalizeText(data?.studentId, 32);
     if (!validLoginId(studentId)) return error('抱歉，仅限本校学生编辑', 403);
-    const existing = studentId === ADMIN_LOGIN_ID
-      ? withoutId(await getDocument('users', studentId))
-      : (await privilegedLoginUsers()).get(studentId) || null;
+    const existingSession = await readSession(request);
+    const retainedRole = existingSession?.student_id === studentId && ['reviewer', 'admin'].includes(existingSession.role)
+      ? existingSession.role
+      : 'student';
     const timestamp = now();
     const user = studentId === ADMIN_LOGIN_ID
-      ? { ...existing, student_id: studentId, role: 'admin', role_locked: 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp }
-      : { student_id: studentId, role: existing?.role || 'student', role_locked: existing?.role_locked || 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp };
-    // Ordinary student sessions are stateless: a guessed-but-valid student ID must not
-    // amplify a login scan into a persistent database write. Privileged roles remain
-    // discoverable through their existing user row, while the protected administrator
-    // is still repaired and persisted on every login.
-    if (studentId === ADMIN_LOGIN_ID) await setDocument('users', studentId, user);
+      ? { student_id: studentId, role: 'admin', role_locked: 0, created_at: timestamp, last_login_at: timestamp }
+      : { student_id: studentId, role: retainedRole, role_locked: 0, created_at: timestamp, last_login_at: timestamp };
+    // Login is intentionally stateless. A scanner or an ordinary student must
+    // never wake PostgreSQL merely so the small privileged-account set can be
+    // discovered. Reviewers regain a lost/expired role with the existing access
+    // code; an unexpired signed session keeps its display role, while every
+    // privileged operation still verifies the current database row.
     const session = await makeSession(studentId, user.role, sessionSecret);
     return result({ user: publicUser(user) }, 200, { 'set-cookie': sessionCookie(session) });
   }
@@ -689,7 +656,6 @@ async function route(request) {
       last_login_at: timestamp
     };
     await setDocument('users', auth.user.student_id, updated);
-    invalidatePrivilegedLoginCache();
     const session = await makeSession(updated.student_id, updated.role, sessionSecret);
     return result({ user: publicUser(updated) }, 200, { 'set-cookie': sessionCookie(session) });
   }
@@ -1092,7 +1058,6 @@ async function route(request) {
     const existing = withoutId(await getDocument('users', studentId));
     const timestamp = now();
     await setDocument('users', studentId, { student_id: studentId, role, role_locked: role === 'student' ? 1 : 0, created_at: existing?.created_at || timestamp, last_login_at: existing?.last_login_at || timestamp });
-    invalidatePrivilegedLoginCache();
     return result({ ok: true });
   }
 

@@ -2,12 +2,12 @@ import { formatDate } from './date.js';
 import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260907-v087';
-import { changelogPage } from './changelog.js?v=20260908-v088';
+import { changelogPage } from './changelog.js?v=20260909-v089';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
 
 const MAINTENANCE_MODE = false;
 const MAINTENANCE_REVIEW_DATE = '2026年9月7日';
-const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], user: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
+const state = { sections: [], articles: [], contributors: [], teacherAdditions: [], drafts: [], submissions: [], privateWorkspace: null, user: null, search: '', editing: null, articleEditing: null, reviewEditing: null, articleCacheBust: null, contributionPreset: null, teacherQuery: '', teacherSubject: '全部', activeDraftManager: null, activeEditor: null, forceNewDraft: false };
 const app = document.querySelector('#app');
 const loginDialog = document.querySelector('#login-dialog');
 const statusLabels = { pending: '等待审核', changes_requested: '需修改', approved: '已发布', rejected: '未采用' };
@@ -16,7 +16,7 @@ const BOOTSTRAP_CACHE_KEY = `lhwiki:bootstrap:${CACHE_VERSION}`;
 const SESSION_CACHE_KEY = `lhwiki:session:${CACHE_VERSION}`;
 const MAINTENANCE_LOCAL_USER_KEY = 'lhwiki:maintenance-local-user';
 const BOOTSTRAP_TTL = 6 * 60 * 60_000;
-const SESSION_TTL = 12 * 60 * 60_000;
+const SESSION_TTL = 7 * 24 * 60 * 60_000;
 let baseTeachers = null;
 let cleanupGameThemeSync = null;
 
@@ -65,11 +65,16 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if ([401, 403].includes(response.status) && !path.startsWith('/api/auth/')) {
+      state.user = null;
+      clearSessionCache();
+    }
     const failure = new Error(data.error || '请求失败');
     failure.status = response.status;
     failure.data = data;
     throw failure;
   }
+  if (method !== 'GET' && !path.startsWith('/api/auth/')) invalidatePrivateWorkspace();
   return data;
 }
 
@@ -114,16 +119,34 @@ async function refreshBootstrap() {
 }
 
 async function loadSession() {
-  if (MAINTENANCE_MODE) return readCache(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL) || { user: null, maintenance: true };
-  const cached = readCache(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL);
+  const cached = readCache(localStorage, SESSION_CACHE_KEY, SESSION_TTL);
   if (cached) return cached;
-  const session = await api('/api/session');
-  writeCache(sessionStorage, SESSION_CACHE_KEY, session);
-  return session;
+  const tabCache = readCache(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL);
+  if (tabCache) {
+    writeCache(localStorage, SESSION_CACHE_KEY, tabCache);
+    return tabCache;
+  }
+  // Session display state is a local convenience only; the signed HttpOnly
+  // cookie and backend guards remain authoritative. Do not call /api/session
+  // during public startup, because privileged cookies previously turned an
+  // ordinary page load into a PostgreSQL wakeup.
+  return { user: null, maintenance: MAINTENANCE_MODE };
 }
 
 function cacheSession(user) {
-  writeCache(sessionStorage, SESSION_CACHE_KEY, { user });
+  writeCache(localStorage, SESSION_CACHE_KEY, { user });
+  clearCache(sessionStorage, SESSION_CACHE_KEY);
+}
+
+function clearSessionCache() {
+  clearCache(localStorage, SESSION_CACHE_KEY);
+  clearCache(sessionStorage, SESSION_CACHE_KEY);
+}
+
+function invalidatePrivateWorkspace() {
+  state.privateWorkspace = null;
+  state.drafts = [];
+  state.submissions = [];
 }
 
 function maintenanceLocalUserId() {
@@ -481,6 +504,41 @@ function snapshotFromSource(source = {}, preset = null) {
   };
 }
 
+function localDraftRecord(localDraft) {
+  if (!localDraft?.snapshot || !localDraft.draftKey) return null;
+  const separator = localDraft.draftKey.indexOf(':');
+  const targetType = separator > 0 ? localDraft.draftKey.slice(0, separator) : 'new';
+  const targetId = targetType === 'new' ? null : localDraft.draftKey.slice(separator + 1) || null;
+  return {
+    ...localDraft.snapshot,
+    id: localDraft.draftId || null,
+    revision: localDraft.revision || null,
+    draftKey: localDraft.draftKey,
+    targetType,
+    targetId,
+    updatedAt: localDraft.savedAt || null
+  };
+}
+
+function findLocalDraft({ draftKey = null, draftId = null, targetType = null, targetId = null } = {}) {
+  const localDrafts = listLocalDrafts(state.user?.studentId || null).map(localDraftRecord).filter(Boolean);
+  return localDrafts.find(draft => (
+    (draftKey && draft.draftKey === draftKey)
+    || (draftId && draft.id === draftId)
+    || (targetType && draft.targetType === targetType && (targetId === null || draft.targetId === targetId))
+  )) || null;
+}
+
+async function loadPrivateWorkspace({ force = false } = {}) {
+  const userId = state.user?.studentId || null;
+  if (!force && state.privateWorkspace?.userId === userId) return state.privateWorkspace.value;
+  const value = await api('/api/mine');
+  state.privateWorkspace = { userId, value };
+  state.drafts = value.drafts || [];
+  state.submissions = value.submissions || [];
+  return value;
+}
+
 async function resolveWritingContext() {
   if (MAINTENANCE_MODE) {
     const localDraft = listLocalDrafts(state.user?.studentId || null)[0] || null;
@@ -496,39 +554,43 @@ async function resolveWritingContext() {
     };
   }
   const current = route();
-  const { drafts, submissions = [] } = await api('/api/mine');
-  state.drafts = drafts;
   if (current.page === 'admin-article-edit') {
     if (state.user?.role !== 'admin') throw new Error('需要管理员权限');
     const slug = current.value || state.articleEditing?.slug;
     if (!slug) throw new Error('没有选择要编辑的已发布文章');
     const article = state.articleEditing?.slug === slug ? state.articleEditing : (await api(`/api/articles/${encodeURIComponent(slug)}`, { cache: 'no-store' })).article;
-    return { targetType: 'article', targetId: slug, source: article, draft: drafts.find(item => item.draftKey === `article:${slug}`), isArticleEdit: true };
+    const draft = findLocalDraft({ draftKey: `article:${slug}` });
+    return { targetType: 'article', targetId: slug, source: draft || article, draft, isArticleEdit: true };
   }
   if (current.page === 'admin-review-edit') {
     if (state.user?.role !== 'admin') throw new Error('需要管理员权限');
     const submissionId = current.value || state.reviewEditing?.id;
     if (!submissionId) throw new Error('没有选择要编辑的待审核稿件');
-    const submission = state.reviewEditing?.id === submissionId
+    const localDraft = findLocalDraft({ draftKey: `submission:${submissionId}` });
+    const submission = localDraft || (state.reviewEditing?.id === submissionId
       ? state.reviewEditing
-      : (await api('/api/review')).submissions.find(item => item.id === submissionId);
+      : (await api('/api/review')).submissions.find(item => item.id === submissionId));
     if (!submission) throw new Error('没有找到这份待审核稿件');
-    return { targetType: 'submission', targetId: submission.id, source: submission, draft: drafts.find(item => item.draftKey === `submission:${submission.id}`), isArticleEdit: false, isReviewEdit: true };
+    return { targetType: 'submission', targetId: submissionId, source: submission, draft: localDraft, isArticleEdit: false, isReviewEdit: true };
   }
   const token = current.value || '';
   if (token.startsWith('draft:')) {
-    const draft = drafts.find(item => item.id === token.slice(6));
+    const draftId = token.slice(6);
+    let draft = findLocalDraft({ draftId }) || state.drafts.find(item => item.id === draftId);
+    if (!draft) draft = (await loadPrivateWorkspace()).drafts.find(item => item.id === draftId);
     if (!draft) throw new Error('没有找到这份草稿');
     return { targetType: draft.targetType, targetId: draft.targetId, source: draft, draft, isArticleEdit: draft.targetType === 'article' };
   }
   let submissionId = token.startsWith('submission:') ? token.slice(11) : state.editing?.id;
   if (submissionId) {
-    const submission = submissions.find(item => item.id === submissionId);
+    const localDraft = findLocalDraft({ draftKey: `submission:${submissionId}` });
+    let submission = localDraft || (state.editing?.id === submissionId ? state.editing : state.submissions.find(item => item.id === submissionId));
+    if (!submission) submission = (await loadPrivateWorkspace()).submissions.find(item => item.id === submissionId);
     if (!submission) throw new Error('没有找到这份投稿');
-    return { targetType: 'submission', targetId: submission.id, source: submission, draft: drafts.find(item => item.draftKey === `submission:${submission.id}`), isArticleEdit: false };
+    return { targetType: 'submission', targetId: submissionId, source: submission, draft: localDraft || state.drafts.find(item => item.draftKey === `submission:${submissionId}`), isArticleEdit: false };
   }
   if (!state.forceNewDraft && !state.contributionPreset) {
-    const existingNewDraft = drafts.find(item => item.targetType === 'new');
+    const existingNewDraft = findLocalDraft({ targetType: 'new', targetId: null });
     if (existingNewDraft) return { targetType: 'new', targetId: null, source: existingNewDraft, draft: existingNewDraft, isArticleEdit: false };
   }
   state.forceNewDraft = false;
@@ -865,12 +927,11 @@ function renderArticleToc(aside, headings) {
   }));
 }
 
-async function minePage() {
+async function minePage({ force = false } = {}) {
   if (!state.user) { loginDialog.showModal(); location.hash = '#/'; return; }
   shell(`<div class="empty">正在读取你的投稿…</div>`);
   try {
-    const { submissions, drafts, teacherSubmissions = [] } = await api('/api/mine');
-    state.drafts = drafts;
+    const { submissions, drafts, teacherSubmissions = [] } = await loadPrivateWorkspace({ force });
     shell(`<header class="page-heading"><span class="eyebrow">My contributions</span><h1>我的投稿</h1><p>继续草稿，或查看已经进入审核流程的内容。</p><button class="button primary" type="button" data-new-draft>新建一篇</button></header>
       <div class="section-heading compact-heading"><div><h2>草稿</h2><p>本机自动保留编辑内容；点击保存后才同步云端。</p></div></div>
       ${drafts.length ? `<div class="draft-list">${drafts.map(item => `<article class="draft-row"><div><div class="meta"><span>${item.targetType === 'article' ? '公开文章修改' : item.targetType === 'submission' ? '投稿修改' : '新投稿'}</span><span>云端版本 ${item.revision}</span><span>${date(item.updatedAt)}</span></div><h3>${esc(item.title || '未命名草稿')}</h3><p>${esc(item.summary || '还没有填写摘要')}</p></div><div class="draft-actions"><a class="button small" href="#/contribute/${encodeURIComponent(`draft:${item.id}`)}">继续写</a><button class="button small danger" type="button" data-delete-draft="${esc(item.id)}" data-draft-key="${esc(item.draftKey)}">删除</button></div></article>`).join('')}</div>` : '<div class="empty compact-empty">暂时没有草稿。</div>'}
@@ -889,7 +950,7 @@ async function minePage() {
         await api(`/api/drafts/${encodeURIComponent(button.dataset.deleteDraft)}`, { method: 'DELETE' });
         clearLocalDraft(state.user.studentId, button.dataset.draftKey);
         toast('草稿已删除');
-        minePage();
+        minePage({ force: true });
       } catch (err) { toast(err.message); }
     }));
   } catch (err) { shell(errorView(err.message)); }
@@ -990,7 +1051,7 @@ async function redeemAccess() {
 async function logout() {
   if (state.user) clearUserLocalDrafts(state.user.studentId);
   state.activeDraftManager?.destroy();
-  await api('/api/auth/logout', { method: 'POST' }); state.user = null; clearCache(sessionStorage, SESSION_CACHE_KEY); toast('已退出登入'); location.hash = '#/'; render();
+  await api('/api/auth/logout', { method: 'POST' }); state.user = null; invalidatePrivateWorkspace(); clearSessionCache(); toast('已退出登入'); location.hash = '#/'; render();
 }
 
 loginDialog.querySelector('#login-form').addEventListener('submit', async event => {
@@ -998,7 +1059,7 @@ loginDialog.querySelector('#login-form').addEventListener('submit', async event 
   const form = event.currentTarget; const errorElement = form.querySelector('[data-login-error]');
   try {
     const { user } = await api('/api/auth/login', { method: 'POST', body: { studentId: new FormData(form).get('studentId') } });
-    state.user = user; cacheSession(user); loginDialog.close(); form.reset(); toast('登入成功'); render();
+    state.user = user; invalidatePrivateWorkspace(); cacheSession(user); loginDialog.close(); form.reset(); toast('登入成功'); render();
   } catch (err) { errorElement.textContent = err.message; }
 });
 
@@ -1024,7 +1085,8 @@ async function render() {
 
 async function init() {
   try {
-    const [bootstrap, session] = await Promise.all([loadBootstrap(), loadSession()]);
+    const session = await loadSession();
+    const bootstrap = await loadBootstrap();
     applyBootstrap(bootstrap); state.user = session.user;
     window.addEventListener('hashchange', render); render();
   } catch (err) { app.innerHTML = errorView(`初始化失败：${err.message}`, true); }

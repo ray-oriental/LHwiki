@@ -258,7 +258,7 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(app, /draft-manager\.js\?v=20260907-v087/);
   assert.match(app, /data-markdown-open/);
   assert.match(html, /theme\.js\?v=20260822-v085/);
-  assert.match(html, /app\.js\?v=20260908-v088/);
+  assert.match(html, /app\.js\?v=20260909-v089/);
   assert.match(css, /:root\[data-theme-effective="dark"\]/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.sidebar-changelog \{ background: linear-gradient/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.teacher-card footer/);

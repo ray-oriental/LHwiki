@@ -116,6 +116,31 @@ test('production-style public routes load the object-storage snapshot without Po
   });
 });
 
+test('ordinary and protected-admin login plus session restore never access PostgreSQL', async () => {
+  const app = createApp({
+    store: rejectingStore(),
+    sessionSecret: 'local-test-session-secret-at-least-32-characters',
+    emergencyMaintenance: false,
+    publicSnapshot: { sections: [], articles: [], contributors: [], teacherAdditions: [] },
+    logger: { error() {} }
+  });
+  await withServer(app, async origin => {
+    for (const [studentId, role] of [['209900001', 'student'], ['ray_oriental', 'admin']]) {
+      const login = await fetch(`${origin}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin },
+        body: JSON.stringify({ studentId })
+      });
+      assert.equal(login.status, 200);
+      assert.equal((await login.clone().json()).user.role, role);
+      const cookie = login.headers.get('set-cookie').split(';', 1)[0];
+      const session = await fetch(`${origin}/api/session`, { headers: { cookie } });
+      assert.equal(session.status, 200);
+      assert.equal((await session.json()).user.role, role);
+    }
+  });
+});
+
 test('handler configuration is instance-local and validates the injected session secret', async () => {
   const app = createApp({
     store: rejectingStore(),

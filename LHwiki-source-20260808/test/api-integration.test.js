@@ -92,6 +92,9 @@ async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
       async login(studentId) {
         return this.request('/api/auth/login', { method: 'POST', body: { studentId } });
       },
+      async elevate(code = 'reviewer-fixture-code') {
+        return this.request('/api/auth/access', { method: 'POST', body: { code } });
+      },
       cookie() { return cookie; }
     };
   }
@@ -143,12 +146,12 @@ test('login, signed session, origin validation and logout run entirely locally',
   });
 });
 
-test('ordinary login scans and signed student sessions reuse the privilege cache without per-request user reads', async () => {
+test('ordinary logins and signed session restoration do not read the users table', async () => {
   await useHarness({}, async ({ store, client }) => {
+    store.failNext('queryDocuments', 'users', new Error('login must not scan privileged users'));
     const first = client();
     assert.equal((await first.login(STUDENT_ID)).status, 200);
 
-    store.failNext('queryDocuments', 'users', new Error('privilege cache should be reused'));
     const second = client();
     assert.equal((await second.login(OTHER_ID)).status, 200);
 
@@ -211,6 +214,7 @@ test('draft submission, requested changes, resubmission and approval form one co
     const reviewer = client();
     await student.login(STUDENT_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
 
     const draft = await student.request('/api/drafts', {
       method: 'POST',
@@ -279,6 +283,7 @@ test('approval publishes an allowlisted persistent snapshot without changing the
     const reviewer = client();
     await student.login(STUDENT_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
     const draft = await student.request('/api/drafts', {
       method: 'POST', body: { clientVersion: 4, draftKey: 'new:persistent_snapshot', targetType: 'new', snapshot: validSnapshot() }
     });
@@ -314,6 +319,7 @@ test('role matrix protects review, cross-owner editing and administrator operati
     await student.login(STUDENT_ID);
     await outsider.login(OTHER_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
     await admin.login(ADMIN_ID);
 
     assert.equal((await anonymous.request('/api/review')).status, 401);
@@ -364,6 +370,7 @@ test('teacher supplement submission and moderated approval stay anonymous in rev
     const reviewer = client();
     await student.login(STUDENT_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
     const submitted = await student.request('/api/teacher-submissions', {
       method: 'POST', body: { name: '测试教师甲', subject: '虚构学科', motto: '仅用于本地测试' }
     });
@@ -387,14 +394,16 @@ test('database failures return bounded errors without leaking internal messages'
     const unavailable = Object.assign(new Error('secret upstream address'), {
       name: 'CloudBasePgError', code: 'UPSTREAM_UNAVAILABLE', status: 503
     });
-    store.failNext('queryDocuments', 'users', unavailable);
-    const loginFailure = await browser.login(STUDENT_ID);
-    assert.equal(loginFailure.status, 503);
-    assert.equal(loginFailure.data.error, '数据库当前请求过多，请稍后重试');
-    assert.doesNotMatch(JSON.stringify(loginFailure.data), /secret upstream address/);
-    assert.match(loginFailure.data.diagnostic, /CloudBasePgError:UPSTREAM_UNAVAILABLE/);
-
     assert.equal((await browser.login(STUDENT_ID)).status, 200);
+    store.failNext('getDocument', 'users', unavailable);
+    const accessFailure = await browser.request('/api/auth/access', {
+      method: 'POST', body: { code: 'reviewer-fixture-code' }
+    });
+    assert.equal(accessFailure.status, 503);
+    assert.equal(accessFailure.data.error, '数据库当前请求过多，请稍后重试');
+    assert.doesNotMatch(JSON.stringify(accessFailure.data), /secret upstream address/);
+    assert.match(accessFailure.data.diagnostic, /CloudBasePgError:UPSTREAM_UNAVAILABLE/);
+
     store.failNext('queryDocuments', 'drafts', new Error('private database detail'));
     const draftFailure = await browser.request('/api/drafts/mine');
     assert.equal(draftFailure.status, 500);

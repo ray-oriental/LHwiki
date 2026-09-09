@@ -24,18 +24,22 @@ test('CloudBase 后端沿用相同的登入规则', () => {
   assert.equal(cloudbaseContent.validLoginId('20260043'), false);
 });
 
-test('普通学生登入不会把学号扫描放大为数据库写入', async () => {
+test('普通登录、管理员登录和会话恢复不会唤醒数据库', async () => {
   const source = await readApiSource();
   assert.match(source, /if \(!origin\) return false/);
-  assert.match(source, /if \(studentId === ADMIN_LOGIN_ID\) await setDocument\('users', studentId, user\)/);
   assert.match(source, /enforceMutationRate\(request, 'login-sustained', 60, 15 \* 60_000\)/);
-  assert.match(source, /return stored \? \{ \.\.\.stored, __persistent: true \} : \{/);
-  assert.doesNotMatch(source, /\n\s*await setDocument\('users', studentId, user\);/);
+  const loginStart = source.indexOf("if (method === 'POST' && path === '/api/auth/login')");
+  const logoutStart = source.indexOf("if (method === 'POST' && path === '/api/auth/logout')", loginStart);
+  const loginSource = source.slice(loginStart, logoutStart);
+  assert.ok(loginStart > 0 && logoutStart > loginStart);
+  assert.doesNotMatch(loginSource, /getDocument\(|queryDocuments\(|setDocument\(|createDocument\(|updateDocuments\(/);
+  assert.match(loginSource, /const existingSession = await readSession\(request\)/);
+  assert.match(source, /version: 3/);
+  assert.match(source, /async function verifyPrivilegedSession\(user\)/);
+  assert.match(source, /const stored = withoutId\(await getDocument\('users', user\.student_id\)\)/);
   assert.match(source, /async function ensurePersistentUser\(user\)/);
   assert.match(source, /auth\.user = await ensurePersistentUser\(auth\.user\)/);
-  assert.match(source, /queryDocuments\('users', \{ role: \{ operator: 'neq', value: 'student' \} \}, 100\)/);
-  assert.match(source, /data\.version === 2 && data\.role === 'student'/);
-  assert.match(source, /const PRIVILEGED_LOGIN_CACHE_TTL = 6 \* 60 \* 60_000/);
+  assert.doesNotMatch(source, /privilegedLoginUsers|PRIVILEGED_LOGIN_CACHE_TTL/);
 });
 
 test('personal workspace batches three lists into one browser request', async () => {
@@ -43,8 +47,22 @@ test('personal workspace batches three lists into one browser request', async ()
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(server, /path === '\/api\/mine'/);
   assert.match(server, /Promise\.all\(\[\s*queryDocuments\('drafts'[\s\S]+queryDocuments\('submissions'[\s\S]+queryDocuments\('teacher_submissions'/);
-  assert.match(client, /const \{ submissions, drafts, teacherSubmissions = \[\] \} = await api\('\/api\/mine'\)/);
+  assert.match(client, /async function loadPrivateWorkspace\(\{ force = false \} = \{\}\)/);
+  assert.match(client, /const value = await api\('\/api\/mine'\)/);
+  assert.match(client, /const \{ submissions, drafts, teacherSubmissions = \[\] \} = await loadPrivateWorkspace\(\{ force \}\)/);
   assert.doesNotMatch(client, /Promise\.all\(\[\s*api\('\/api\/submissions\/mine'\)/);
+});
+
+test('opening the editor restores local work without reading PostgreSQL', async () => {
+  const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = client.indexOf('async function resolveWritingContext()');
+  const end = client.indexOf('async function contributePage()', start);
+  const resolver = client.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(resolver, /const existingNewDraft = findLocalDraft\(\{ targetType: 'new', targetId: null \}\)/);
+  assert.match(resolver, /if \(!draft\) draft = \(await loadPrivateWorkspace\(\)\)\.drafts\.find/);
+  assert.match(resolver, /if \(!submission\) submission = \(await loadPrivateWorkspace\(\)\)\.submissions\.find/);
+  assert.doesNotMatch(resolver, /const \{ drafts, submissions = \[\] \} = await api\('\/api\/mine'\)/);
 });
 
 test('生产稳定性巡检有明确的低并发和总请求预算', async () => {
@@ -171,11 +189,13 @@ test('public browsing batches cache-miss reads and keeps a static outage fallbac
   const server = await readApiSource();
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(client, /const BOOTSTRAP_TTL = 6 \* 60 \* 60_000/);
-  assert.match(client, /const SESSION_TTL = 12 \* 60 \* 60_000/);
+  assert.match(client, /const SESSION_TTL = 7 \* 24 \* 60 \* 60_000/);
   assert.match(client, /readCache\(localStorage, BOOTSTRAP_CACHE_KEY, BOOTSTRAP_TTL\)/);
   assert.match(client, /await import\('\.\/teachers\.js\?v=20260810-directory-supplement-2'\)/);
-  assert.match(client, /readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
-  assert.match(client, /Promise\.all\(\[loadBootstrap\(\), loadSession\(\)\]\)/);
+  assert.match(client, /readCache\(localStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
+  assert.match(client, /const tabCache = readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
+  assert.doesNotMatch(client, /await api\('\/api\/session'\)/);
+  assert.match(client, /const session = await loadSession\(\);\s+const bootstrap = await loadBootstrap\(\);/);
   assert.match(server, /const PUBLIC_CACHE_TTL = 6 \* 60 \* 60_000/);
   assert.match(server, /const ARTICLE_CACHE_TTL = 6 \* 60 \* 60_000/);
   assert.match(server, /let publicCachePromise = null/);
@@ -349,7 +369,7 @@ test('emergency maintenance keeps private and mutation routes away from PostgreS
   assert.match(client, /const MAINTENANCE_MODE = false/);
   assert.match(client, /网站近期运行不稳定，暂时停用云端上传/);
   assert.match(client, /预计于 \$\{MAINTENANCE_REVIEW_DATE\} 恢复/);
-  assert.match(client, /readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\) \|\| \{ user: null, maintenance: true \}/);
+  assert.match(client, /return \{ user: null, maintenance: MAINTENANCE_MODE \}/);
 });
 
 test('in-memory mutation limiter has an absolute bucket cap', async () => {
