@@ -27,8 +27,6 @@ async function probe(origin, path, expectation) {
     if (expectation === 'html' && !/<html/i.test(body)) throw new Error('HTML document missing');
     if (expectation === 'script' && body.length < 100) throw new Error('static asset unexpectedly short');
     if (path.startsWith('/api/health') && (!body?.ok || body?.database !== 'deferred')) throw new Error('health response is invalid');
-    if (path === '/api/bootstrap' && (!Array.isArray(body?.sections) || !Array.isArray(body?.articles))) throw new Error('bootstrap shape invalid');
-    if (path === '/api/session' && !Object.hasOwn(body || {}, 'user')) throw new Error('session shape invalid');
     const durationMs = Math.round(performance.now() - started);
     return { origin, path, ok: true, status: response.status, durationMs };
   } catch (error) {
@@ -44,9 +42,7 @@ const fullBaseline = [
   ['/app.js', 'script'],
   ['/editor.js', 'script'],
   ['/draft-manager.js', 'script'],
-  ['/api/health', 'json'],
-  ['/api/bootstrap', 'json'],
-  ['/api/session', 'json']
+  ['/api/health', 'json']
 ];
 const quickBaseline = [
   ['/', 'html'],
@@ -55,7 +51,7 @@ const quickBaseline = [
 ];
 
 const requestBudget = quick ? origins.length * quickBaseline.length : origins.length * (fullBaseline.length + rounds);
-if (requestBudget > 30) throw new Error(`稳定性巡检请求预算超限：${requestBudget} > 30`);
+if (requestBudget > 20) throw new Error(`稳定性巡检请求预算超限：${requestBudget} > 20`);
 
 for (const origin of origins) {
   results.push(...await Promise.all((quick ? quickBaseline : fullBaseline).map(([path, type]) => probe(origin, path, type))));

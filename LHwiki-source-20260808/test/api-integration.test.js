@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const { createApp } = require('../cloudbase/functions/lhwiki-api/api-app.cjs');
+const { createCosWorkflowStore, createFakeObjectClient } = require('../cloudbase/functions/lhwiki-api/cos-workflow-store.cjs');
 const { fromBackup } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
 const { createMemoryStore } = require('./helpers/memory-store.cjs');
 
@@ -46,9 +47,10 @@ function submissionInput(overrides = {}) {
   return validSnapshot(overrides);
 }
 
-async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
-  const store = createMemoryStore(data);
+async function createHarness({ data = fixtureData(), store: suppliedStore = null, appOptions = {} } = {}) {
+  const store = suppliedStore || createMemoryStore(data);
   let sequence = 0;
+  let idempotencySequence = 0;
   const errors = [];
   const app = createApp({
     store,
@@ -74,9 +76,12 @@ async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
   function client() {
     let cookie = '';
     return {
-      async request(path, { method = 'GET', body, cookie: cookieOverride, requestOrigin = origin } = {}) {
+      async request(path, { method = 'GET', body, cookie: cookieOverride, requestOrigin = origin, idempotencyKey } = {}) {
         const headers = { accept: 'application/json' };
         if (!['GET', 'HEAD'].includes(method) && requestOrigin !== null) headers.origin = requestOrigin;
+        if (!['GET', 'HEAD'].includes(method) && !['/api/auth/login', '/api/auth/logout', '/api/visits'].includes(path)) {
+          headers['idempotency-key'] = idempotencyKey || `fixture-idempotency-${++idempotencySequence}`;
+        }
         const sentCookie = cookieOverride === undefined ? cookie : cookieOverride;
         if (sentCookie) headers.cookie = sentCookie;
         if (body !== undefined) headers['content-type'] = 'application/json';
@@ -303,6 +308,61 @@ test('approval publishes an allowlisted persistent snapshot without changing the
   });
 });
 
+test('failed public snapshot publish returns an error and the same idempotency key reconciles without duplicate approval', async () => {
+  const objects = createFakeObjectClient();
+  const workflowStore = createCosWorkflowStore({
+    objectClient: objects,
+    envId: 'test',
+    secret: 'integration-workflow-secret-which-is-long-enough-123456',
+    initialData: fixtureData(),
+    clock: () => FIXED_TIME
+  });
+  let saves = 0;
+  let remoteSnapshot = fromBackup({
+    formatVersion: 1,
+    exportedAt: new Date(FIXED_TIME - 1000).toISOString(),
+    data: { sections: fixtureData().sections, articles: [], contributors: [], teacher_additions: [] }
+  });
+  const publicSnapshotStore = {
+    async load() { return structuredClone(remoteSnapshot); },
+    async save(snapshot) {
+      saves += 1;
+      if (saves === 1) throw Object.assign(new Error('injected snapshot outage'), { code: 'UPLOAD_FAILED', status: 503 });
+      remoteSnapshot = structuredClone(snapshot);
+      return snapshot;
+    }
+  };
+  const buildPublicSnapshot = data => fromBackup({ formatVersion: 1, exportedAt: new Date(FIXED_TIME).toISOString(), data });
+  await useHarness({ store: workflowStore, appOptions: { publicSnapshotStore, buildPublicSnapshot } }, async ({ client }) => {
+    const student = client();
+    const reviewer = client();
+    await student.login(STUDENT_ID);
+    await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
+    const draft = await student.request('/api/drafts', {
+      method: 'POST', body: { clientVersion: 4, draftKey: 'new:snapshot_recovery', targetType: 'new', snapshot: validSnapshot() }
+    });
+    await student.request(`/api/drafts/${draft.data.draft.id}/submit`, {
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
+    });
+    const approvalKey = 'approval-snapshot-recovery-key';
+    const failed = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', idempotencyKey: approvalKey, body: { action: 'approve', note: '' }
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(remoteSnapshot.articles.length, 0);
+
+    const recovered = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', idempotencyKey: approvalKey, body: { action: 'approve', note: '' }
+    });
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.data.publicSnapshotSynced, true);
+    assert.equal(remoteSnapshot.articles.length, 1);
+    assert.equal((await workflowStore.queryDocuments('articles')).length, 1);
+    assert.equal((await workflowStore.queryDocuments('review_events')).filter(event => event.submission_id === draft.data.draft.id).length, 1);
+  });
+});
+
 test('role matrix protects review, cross-owner editing and administrator operations', async () => {
   const pending = {
     id: 'submission-fixture', student_id: STUDENT_ID, section_slug: 'start', title: '权限矩阵投稿',
@@ -400,7 +460,7 @@ test('database failures return bounded errors without leaking internal messages'
       method: 'POST', body: { code: 'reviewer-fixture-code' }
     });
     assert.equal(accessFailure.status, 503);
-    assert.equal(accessFailure.data.error, '数据库当前请求过多，请稍后重试');
+    assert.equal(accessFailure.data.error, '存储服务当前繁忙，请稍后重试');
     assert.doesNotMatch(JSON.stringify(accessFailure.data), /secret upstream address/);
     assert.match(accessFailure.data.diagnostic, /CloudBasePgError:UPSTREAM_UNAVAILABLE/);
 

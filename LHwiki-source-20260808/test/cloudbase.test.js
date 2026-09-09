@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
@@ -8,6 +9,7 @@ const cloudbaseContent = require('../cloudbase/functions/lhwiki-api/content.cjs'
 const { PRIMARY_KEYS, createPgStore } = require('../cloudbase/functions/lhwiki-api/pg-store.cjs');
 const { createPublicSnapshotStore } = require('../cloudbase/functions/lhwiki-api/public-snapshot-store.cjs');
 const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
+const { buildProductionFunction } = await import('../scripts/build-cloudbase-function.mjs');
 
 async function readApiSource() {
   const [app, server] = await Promise.all([
@@ -42,6 +44,57 @@ test('普通登录、管理员登录和会话恢复不会唤醒数据库', async
   assert.doesNotMatch(source, /privilegedLoginUsers|PRIVILEGED_LOGIN_CACHE_TTL/);
 });
 
+test('production function package uses an exact allowlist and excludes every PostgreSQL maintenance artifact', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../cloudbase/function-production-files.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.functionName, 'lhwiki-api');
+  assert.equal(manifest.files.length, 13);
+  assert.equal(new Set(manifest.files).size, manifest.files.length);
+  assert.ok(manifest.files.includes('server.js'));
+  assert.ok(manifest.files.includes('cos-workflow-store.cjs'));
+  assert.ok(manifest.files.includes('public-snapshot.json'));
+  assert.equal(manifest.files.some(path => /pg-store|migration|backup|\.sql$|\.env/i.test(path)), false);
+
+  const workRoot = new URL('../work/', import.meta.url);
+  await mkdir(workRoot, { recursive: true });
+  const temporary = await mkdtemp(new URL('function-package-', workRoot));
+  try {
+    const outputDir = join(temporary, 'lhwiki-api');
+    const reportPath = join(temporary, 'package-manifest.json');
+    const report = await buildProductionFunction({ outputDir, reportPath });
+    const packaged = (await readdir(outputDir)).sort();
+    assert.deepEqual(packaged, [...manifest.files].sort());
+    assert.equal(report.files.length, manifest.files.length);
+    assert.equal(packaged.includes('pg-store.cjs'), false);
+    await assert.rejects(
+      () => buildProductionFunction({
+        outputDir: join(temporary, '..', '..', '..', 'escaped-package'),
+        reportPath
+      }),
+      /must be a child of the project root/
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('legacy all-in-one deploy entry only prepares the safe allowlisted release', async () => {
+  const source = await readFile(new URL('../cloudbase/deploy-cloudbase.ps1', import.meta.url), 'utf8');
+  assert.match(source, /prepare-production-release\.ps1/);
+  assert.doesNotMatch(source, /db['"],\s*['"]nosql|permission['"],\s*['"]set|fn['"],\s*['"]deploy|CLOUDBASE_APIKEY|SESSION_SECRET/);
+});
+
+test('historical PostgreSQL backups require explicit confirmation and can never become a daily task', async () => {
+  const [backup, setup] = await Promise.all([
+    readFile(new URL('../cloudbase/backup-cloudbase.ps1', import.meta.url), 'utf8'),
+    readFile(new URL('../cloudbase/setup-backup.ps1', import.meta.url), 'utf8')
+  ]);
+  assert.match(backup, /\[switch\]\$ConfirmPostgreSqlWakeup/);
+  assert.match(backup, /if \(-not \$ConfirmPostgreSqlWakeup\)/);
+  assert.match(setup, /if \(\$EnableScheduledTask\)/);
+  assert.match(setup, /永久停用每日 PostgreSQL 备份任务/);
+  assert.doesNotMatch(setup, /Register-ScheduledTask|New-ScheduledTaskTrigger|New-ScheduledTaskAction/);
+});
+
 test('personal workspace batches three lists into one browser request', async () => {
   const server = await readApiSource();
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -69,9 +122,10 @@ test('生产稳定性巡检有明确的低并发和总请求预算', async () =>
   const source = await readFile(new URL('../scripts/stability-check.mjs', import.meta.url), 'utf8');
   assert.match(source, /Math\.min\(4, Number\(process\.env\.LHWIKI_CONCURRENCY \|\| 2\)\)/);
   assert.match(source, /Math\.min\(5, Number\(process\.env\.LHWIKI_ROUNDS \|\| 2\)\)/);
-  assert.match(source, /requestBudget > 30/);
+  assert.match(source, /requestBudget > 20/);
+  assert.doesNotMatch(source, /\/api\/(?:bootstrap|session)/);
   const quickBaseline = source.slice(source.indexOf('const quickBaseline'), source.indexOf('const requestBudget'));
-  assert.doesNotMatch(quickBaseline, /\/api\/bootstrap/);
+  assert.match(quickBaseline, /\/api\/health/);
   assert.match(source, /queue\.push\(\[origin, '\/api\/health', 'json'\]\)/);
 });
 
@@ -125,7 +179,7 @@ test('public seed fallback is independent from private migration data', () => {
   assert.ok(snapshot.articles.every(article => Array.isArray(article.body)));
 });
 
-test('public snapshot storage validates downloads and overwrites one fixed object', async () => {
+test('public snapshot storage validates downloads and writes an immutable version plus compatibility alias', async () => {
   const snapshot = validatePublicSnapshot({
     schemaVersion: 1,
     generatedAt: '2030-01-02T03:04:05.000Z',
@@ -133,30 +187,26 @@ test('public snapshot storage validates downloads and overwrites one fixed objec
     articles: [], contributors: [], teacherAdditions: []
   });
   const calls = [];
+  const uploads = [];
   const response = (status, data) => ({ ok: status >= 200 && status < 300, status, text: async () => typeof data === 'string' ? data : JSON.stringify(data) });
   const store = createPublicSnapshotStore({
-    envId: 'example-env',
-    apiKey: 'server-key',
+    objectClient: { async upload(path, body, options) { uploads.push({ path, body: String(body), options }); } },
     publicUrl: 'https://storage.example/public-snapshot.json',
     validate: validatePublicSnapshot,
     fetchImpl: async (url, options = {}) => {
       calls.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body });
       if (String(url) === 'https://storage.example/public-snapshot.json') return response(200, snapshot);
-      if (String(url).endsWith('/v1/storages/get-objects-upload-info')) return response(200, [{
-        uploadUrl: 'https://upload.example/object', authorization: 'signed-upload', token: 'temporary-token', cloudObjectMeta: 'object-meta'
-      }]);
-      if (String(url) === 'https://upload.example/object') return response(200, '');
       return response(404, { code: 'NOT_FOUND' });
     }
   });
   assert.deepEqual(await store.load(), snapshot);
   assert.deepEqual(await store.save(snapshot), snapshot);
-  assert.equal(calls[1].method, 'POST');
-  assert.deepEqual(JSON.parse(calls[1].body), [{ objectId: 'lhwiki-system/public-snapshot.json' }]);
-  assert.equal(calls[1].headers.authorization, 'Bearer server-key');
-  assert.equal(calls[2].method, 'PUT');
-  assert.equal(calls[2].headers.authorization, 'signed-upload');
-  assert.deepEqual(JSON.parse(calls[2].body), snapshot);
+  assert.equal(calls.length, 1);
+  assert.match(uploads[0].path, /^lhwiki-public-workflow-v2\/snapshots\/000000000000-[a-f0-9]{64}\.json$/);
+  assert.deepEqual(JSON.parse(uploads[0].body), snapshot);
+  assert.equal(uploads[0].options.forbidOverwrite, false);
+  assert.equal(uploads[0].options.acl, 'public-read');
+  assert.equal(uploads[1].path, 'lhwiki-system/public-snapshot.json');
 });
 
 test('PostgreSQL adapter opens a 503 circuit at the per-instance request budget', async () => {
@@ -428,11 +478,13 @@ test('管理员可以校订待审核稿件但不会绕过审核或改变投稿�
   assert.match(migration, /'admin_edit'/);
 });
 
-test('公开文章读取不缓存旧正文，管理员保存后刷新仍保持更新', async () => {
+test('普通文章读取复用 HTTP 缓存，管理员保存后仍强制刷新正文', async () => {
   const server = await readApiSource();
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(server, /max-age=300, stale-while-revalidate=600/);
-  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}\$\{cacheBust\}`, \{ cache: 'no-store' \}\)/);
+  assert.match(server, /max-age=21600, stale-while-revalidate=604800/);
+  assert.match(client, /const articleOptions = cacheBust \? \{ cache: 'reload' \} : \{\};/);
+  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}\$\{cacheBust\}`, articleOptions\)/);
+  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}`, \{ cache: 'no-store' \}\)/);
 });
 
 test('CloudBase 种子包含完整基础目录和文章', async () => {

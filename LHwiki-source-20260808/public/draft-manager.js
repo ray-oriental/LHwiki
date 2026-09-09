@@ -86,6 +86,9 @@ export class DraftManager {
     this.conflicted = false;
     this.removing = false;
     this.warnBeforeUnload = warnBeforeUnload;
+    this.saveIdempotencyKey = null;
+    this.submitIdempotencyKey = null;
+    this.removeIdempotencyKey = null;
     this.lastState = 'saved';
     this.channel = this.createChannel();
     this.onlineHandler = () => {
@@ -181,6 +184,12 @@ export class DraftManager {
   async saveNow() {
     this.persistLocal();
     if (!this.snapshot || this.conflicted) return null;
+    // A submit always asks for a save first. If the exact revision is already
+    // durable, avoid a second function/COS mutation before the submit call.
+    if (this.id && this.revision && this.sequence === this.savedSequence) {
+      this.setState('saved', this.updatedAt ? `已保存于 ${this.formatTime(this.updatedAt)}` : '已保存到云端');
+      return { id: this.id, revision: this.revision, updatedAt: this.updatedAt };
+    }
     if (!navigator.onLine) {
       this.setState('offline', '离线：已保存在这台设备');
       return null;
@@ -202,9 +211,10 @@ export class DraftManager {
   async performSave(snapshot, sendingSequence) {
     try {
       const wasNew = !this.id;
+      this.saveIdempotencyKey ||= crypto.randomUUID();
       const response = wasNew
-        ? await this.api('/api/drafts', { method: 'POST', body: { clientVersion: DRAFT_CLIENT_VERSION, draftKey: this.draftKey, targetType: this.targetType, targetId: this.targetId, snapshot } })
-        : await this.api(`/api/drafts/${encodeURIComponent(this.id)}`, { method: 'PUT', body: { clientVersion: DRAFT_CLIENT_VERSION, expectedRevision: this.revision, snapshot } });
+        ? await this.api('/api/drafts', { method: 'POST', idempotencyKey: this.saveIdempotencyKey, body: { clientVersion: DRAFT_CLIENT_VERSION, draftKey: this.draftKey, targetType: this.targetType, targetId: this.targetId, snapshot } })
+        : await this.api(`/api/drafts/${encodeURIComponent(this.id)}`, { method: 'PUT', idempotencyKey: this.saveIdempotencyKey, body: { clientVersion: DRAFT_CLIENT_VERSION, expectedRevision: this.revision, snapshot } });
       const draft = response.draft;
       this.id = draft.id;
       this.draftKey = draft.draftKey;
@@ -213,6 +223,7 @@ export class DraftManager {
       this.savedSequence = Math.max(this.savedSequence, sendingSequence);
       this.channel?.postMessage({ revision: this.revision, updatedAt: this.updatedAt });
       this.persistLocal();
+      this.saveIdempotencyKey = null;
       if (this.sequence === this.savedSequence) this.setState('saved', `已保存 ${this.formatTime(this.updatedAt)}`);
       else this.setState('dirty', '保存期间有新修改，正在继续保存');
       return draft;
@@ -246,8 +257,10 @@ export class DraftManager {
     if (!this.id || !this.revision) throw new Error('草稿还没有保存到云端，请重试');
     const result = await this.api(`/api/drafts/${encodeURIComponent(this.id)}/submit`, {
       method: 'POST',
+      idempotencyKey: this.submitIdempotencyKey ||= crypto.randomUUID(),
       body: { clientVersion: DRAFT_CLIENT_VERSION, expectedRevision: this.revision }
     });
+    this.submitIdempotencyKey = null;
     clearLocalDraft(this.userId, this.draftKey);
     return result;
   }
@@ -256,7 +269,10 @@ export class DraftManager {
     this.removing = true;
     clearTimeout(this.localTimer);
     if (this.saving) await this.saving;
-    if (this.id) await this.api(`/api/drafts/${encodeURIComponent(this.id)}`, { method: 'DELETE' });
+    if (this.id) {
+      await this.api(`/api/drafts/${encodeURIComponent(this.id)}`, { method: 'DELETE', idempotencyKey: this.removeIdempotencyKey ||= crypto.randomUUID() });
+      this.removeIdempotencyKey = null;
+    }
     clearLocalDraft(this.userId, this.draftKey);
     this.snapshot = null;
     this.snapshotFingerprint = null;

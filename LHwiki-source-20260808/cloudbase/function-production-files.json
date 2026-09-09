@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "functionName": "lhwiki-api",
+  "files": [
+    "api-app.cjs",
+    "cloudbase-cos-http.cjs",
+    "content.cjs",
+    "cos-workflow-store.cjs",
+    "known-teachers-supplement.cjs",
+    "package.json",
+    "pnpm-lock.yaml",
+    "public-snapshot-store.cjs",
+    "public-snapshot.cjs",
+    "public-snapshot.json",
+    "scf_bootstrap",
+    "seed-data.json",
+    "server.js"
+  ]
+}

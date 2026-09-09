@@ -1,8 +1,8 @@
 import { formatDate } from './date.js';
 import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
-import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260907-v087';
-import { changelogPage } from './changelog.js?v=20260909-v089';
+import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260909-v0810c';
+import { changelogPage } from './changelog.js?v=20260909-v0810a';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
 
 const MAINTENANCE_MODE = false;
@@ -19,6 +19,28 @@ const BOOTSTRAP_TTL = 6 * 60 * 60_000;
 const SESSION_TTL = 7 * 24 * 60 * 60_000;
 let baseTeachers = null;
 let cleanupGameThemeSync = null;
+const IDEMPOTENCY_PREFIX = 'lhwiki:idempotency:v1:';
+
+function idempotencySlot(method, path, body) {
+  const input = `${method}\n${path}\n${typeof body === 'string' ? body : JSON.stringify(body ?? null)}`;
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) hash = Math.imul(hash ^ input.charCodeAt(index), 16777619);
+  return `${IDEMPOTENCY_PREFIX}${(hash >>> 0).toString(16)}`;
+}
+
+function pendingIdempotencyKey(slot) {
+  try {
+    const existing = sessionStorage.getItem(slot);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    sessionStorage.setItem(slot, created);
+    return created;
+  } catch { return crypto.randomUUID(); }
+}
+
+function clearPendingIdempotency(slot) {
+  try { sessionStorage.removeItem(slot); } catch { /* storage may be disabled */ }
+}
 
 async function ensureTeachers() {
   if (!baseTeachers) ({ TEACHERS: baseTeachers } = await import('./teachers.js?v=20260810-directory-supplement-2'));
@@ -29,9 +51,19 @@ const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&a
 
 async function api(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
-  // Backend PostgreSQL failures are deliberately surfaced without retry.
+  const mutation = !['GET', 'HEAD'].includes(method) && !['/api/auth/login', '/api/auth/logout'].includes(path);
+  const headers = { 'content-type': 'application/json', ...options.headers };
+  let idempotencyStorageSlot = null;
+  if (mutation && !headers['Idempotency-Key'] && !headers['idempotency-key']) {
+    if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;
+    else {
+      idempotencyStorageSlot = idempotencySlot(method, path, options.body);
+      headers['Idempotency-Key'] = pendingIdempotencyKey(idempotencyStorageSlot);
+    }
+  }
+  // Backend storage failures are deliberately surfaced without retry.
   // Retrying the whole cloud function from the browser would multiply cold
-  // starts and database wakeups, so low-resource mode uses one attempt.
+  // starts and duplicate writes, so low-resource mode uses one attempt.
   const maxAttempts = 1;
   let response;
   let lastError;
@@ -43,7 +75,7 @@ async function api(path, options = {}) {
         ...options,
         method,
         signal: controller.signal,
-        headers: { 'content-type': 'application/json', ...options.headers },
+        headers,
         body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body
       });
       if (attempt < maxAttempts && [502, 503, 504].includes(response.status)) {
@@ -64,6 +96,7 @@ async function api(path, options = {}) {
     throw new Error(lastError?.name === 'AbortError' ? '请求超时，请检查网络后重试' : '网络暂时不可用，请稍后重试');
   }
   const data = await response.json().catch(() => ({}));
+  if (idempotencyStorageSlot && (response.ok || (response.status < 500 && !data?.conflict))) clearPendingIdempotency(idempotencyStorageSlot);
   if (!response.ok) {
     if ([401, 403].includes(response.status) && !path.startsWith('/api/auth/')) {
       state.user = null;
@@ -457,7 +490,8 @@ async function articlePage(slug) {
   try {
     const cacheBust = state.articleCacheBust === slug ? `?refresh=${Date.now()}` : '';
     state.articleCacheBust = null;
-    const { article } = await api(`/api/articles/${encodeURIComponent(slug)}${cacheBust}`, { cache: 'no-store' });
+    const articleOptions = cacheBust ? { cache: 'reload' } : {};
+    const { article } = await api(`/api/articles/${encodeURIComponent(slug)}${cacheBust}`, articleOptions);
     const section = state.sections.find(item => item.slug === article.section_slug);
     const adminActions = state.user?.role === 'admin' ? `<div class="form-actions"><button class="button" type="button" data-admin-edit-article>编辑已发布稿件</button><button class="button danger" type="button" data-admin-delete-article>删除稿件</button></div>` : '';
     shell(`<div class="article-layout"><article><div class="breadcrumbs"><a href="#/">首页</a>　/　<a href="#/section/${esc(article.section_slug)}">${esc(section?.title || '')}</a></div>

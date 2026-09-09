@@ -166,25 +166,50 @@ async function syncPublicSnapshot(reason) {
     return null;
   }
   try {
-    const [sections, articles, contributors, teacherAdditions] = await Promise.all([
-      queryDocuments('sections', null, 100),
-      queryDocuments('articles', null, 2000),
-      queryDocuments('contributors', null, 2000),
-      queryDocuments('teacher_additions', null, 500)
-    ]);
-    const nextSnapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
-    await publicSnapshotStore.save(nextSnapshot);
-    publicSnapshot = nextSnapshot;
-    publicSnapshotLoadedAt = clock();
-    publicCache = { savedAt: clock(), value: snapshotBootstrap(nextSnapshot) };
-    publicCachePromise = null;
-    articleCache.clear();
+    const publish = async () => {
+      const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+        queryDocuments('sections', null, 100),
+        queryDocuments('articles', null, 2000),
+        queryDocuments('contributors', null, 2000),
+        queryDocuments('teacher_additions', null, 500)
+      ]);
+      const nextSnapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+      await publicSnapshotStore.save(nextSnapshot, { revision: store.getRevision?.() });
+      publicSnapshot = nextSnapshot;
+      publicSnapshotLoadedAt = clock();
+      publicCache = { savedAt: clock(), value: snapshotBootstrap(nextSnapshot) };
+      publicCachePromise = null;
+      articleCache.clear();
+      store.clearInternalMetaInMemory?.('pendingPublicSnapshot');
+    };
+    if (typeof store.setInternalMeta === 'function' && typeof store.afterCommit === 'function') {
+      store.setInternalMeta('pendingPublicSnapshot', { reason, requestedAt: new Date(clock()).toISOString() });
+      store.afterCommit(publish);
+    } else {
+      await publish();
+    }
     return true;
   } catch (err) {
     invalidatePublicCache();
     logger.error?.(`public-snapshot-sync-failed:${reason}:${safeDiagnostic(err)}`);
     return false;
   }
+}
+
+async function reconcilePendingPublicSnapshot() {
+  if (!publicSnapshotStore?.save || typeof store.getInternalMeta !== 'function') return;
+  const pending = store.getInternalMeta('pendingPublicSnapshot');
+  if (!pending) return;
+  const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+    queryDocuments('sections', null, 100), queryDocuments('articles', null, 2000),
+    queryDocuments('contributors', null, 2000), queryDocuments('teacher_additions', null, 500)
+  ]);
+  const snapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+  await publicSnapshotStore.save(snapshot, { revision: store.getRevision?.() });
+  publicSnapshot = snapshot;
+  publicSnapshotLoadedAt = clock();
+  store.setInternalMeta?.('pendingPublicSnapshot', undefined);
+  invalidatePublicCache();
 }
 
 async function ensureSeed() {
@@ -531,7 +556,7 @@ function normalizePath(rawUrl) {
   return pathname.startsWith('/api') ? pathname : `/api${pathname === '/' ? '' : pathname}`;
 }
 
-async function route(request) {
+async function routeInner(request) {
   const method = request.method.toUpperCase();
   const path = normalizePath(request.url);
   if (!['GET', 'HEAD'].includes(method) && !checkMutationOrigin(request)) return error('请求来源无效', 403);
@@ -1064,6 +1089,32 @@ async function route(request) {
   return error('API 路径不存在', 404);
 }
 
+// Business mutations are committed as one immutable workflow generation. The
+// Login/logout and visit endpoints are stateless or paused. Access-code role
+// elevation persists data and therefore must use the same atomic path.
+async function route(request) {
+  const method = String(request.method || 'GET').toUpperCase();
+  const path = normalizePath(request.url);
+  const exempt = path === '/api/visits' || path === '/api/auth/login' || path === '/api/auth/logout';
+  const mutation = !['GET', 'HEAD'].includes(method) && !exempt;
+  if (!mutation || typeof store.runInTransaction !== 'function') return routeInner(request);
+  if (!checkMutationOrigin(request)) return error('请求来源无效', 403);
+  const idempotencyKey = String(request.headers['idempotency-key'] || '').trim();
+  if (!idempotencyKey || idempotencyKey.length > 200) {
+    return result({ error: '请升级客户端后重试', upgradeRequired: true }, 409);
+  }
+  const body = await readJson(request);
+  const session = await readSession(request);
+  const actor = session?.student_id || 'anonymous';
+  if (typeof store.runIdempotent === 'function') {
+    return store.runInTransaction(async () => {
+      await reconcilePendingPublicSnapshot();
+      return store.runIdempotent({ actor, method, path, key: idempotencyKey, body }, () => routeInner(request));
+    });
+  }
+  return store.runInTransaction(async () => { await reconcilePendingPublicSnapshot(); return routeInner(request); });
+}
+
 async function validateSubmission(data) {
   const section = normalizeText(data?.sectionSlug, 60);
   const title = normalizeText(data?.title, 100);
@@ -1100,8 +1151,9 @@ async function handler(request, response) {
     send(response, await route(request));
   } catch (err) {
     logger.error(err);
-    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : err?.status === 429 ? 429 : 500;
-    send(response, result({ error: status === 503 ? '数据库当前请求过多，请稍后重试' : '服务器暂时无法处理请求', diagnostic: safeDiagnostic(err) }, status));
+    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : [409, 429].includes(err?.status) ? err.status : 500;
+    const message = status === 503 ? '存储服务当前繁忙，请稍后重试' : status === 409 ? '内容已在别处更新，请重试' : '服务器暂时无法处理请求';
+    send(response, result({ error: message, ...(status === 409 ? { conflict: true } : {}), diagnostic: safeDiagnostic(err) }, status));
   }
 }
 

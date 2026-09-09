@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 function failure(message, code, status) {
   const error = new Error(message);
   error.name = 'PublicSnapshotStoreError';
@@ -17,15 +19,15 @@ async function readJsonResponse(response, code) {
 }
 
 function createPublicSnapshotStore({
-  envId,
-  apiKey,
+  objectClient,
   publicUrl,
   cloudPath = 'lhwiki-system/public-snapshot.json',
+  snapshotPrefix = 'lhwiki-public-workflow-v2/snapshots',
   validate,
   fetchImpl = globalThis.fetch,
   timeoutMs = 8000
 } = {}) {
-  if (!envId || !apiKey || !publicUrl || typeof validate !== 'function' || typeof fetchImpl !== 'function') {
+  if (!objectClient?.upload || !publicUrl || typeof validate !== 'function' || typeof fetchImpl !== 'function') {
     throw new Error('Public snapshot storage configuration is unavailable');
   }
 
@@ -42,38 +44,31 @@ function createPublicSnapshotStore({
   }
 
   async function load() {
+    try {
+      const paths = (await objectClient.list(`${snapshotPrefix}/`)).filter(path => /\/\d{12}-[a-f0-9]{64}\.json$/.test(path)).sort();
+      if (paths.length) return validate(JSON.parse((await objectClient.download(paths.at(-1))).toString('utf8')));
+    } catch { /* The checked-in/CDN snapshot remains the read-only fallback. */ }
     const response = await request(publicUrl, { headers: { accept: 'application/json' }, cache: 'no-store' });
     return validate(await readJsonResponse(response, 'SNAPSHOT_DOWNLOAD_FAILED'));
   }
 
-  async function save(snapshot) {
+  async function save(snapshot, { revision } = {}) {
     const validated = validate(snapshot);
     const payload = JSON.stringify(validated);
-    const infoResponse = await request(`https://${envId}.api.tcloudbasegateway.com/v1/storages/get-objects-upload-info`, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify([{ objectId: cloudPath }])
-    });
-    const info = await readJsonResponse(infoResponse, 'SNAPSHOT_UPLOAD_INFO_FAILED');
-    const target = Array.isArray(info) ? info[0] : null;
-    if (!target?.uploadUrl || !target?.authorization || !target?.token || !target?.cloudObjectMeta || target.code) {
-      throw failure('Public snapshot upload information was incomplete', 'SNAPSHOT_UPLOAD_INFO_INVALID');
+    const hash = crypto.createHash('sha256').update(payload).digest('hex');
+    const count = String(Number(revision?.count || 0)).padStart(12, '0');
+    try {
+      await objectClient.upload(`${snapshotPrefix}/${count}-${hash}.json`, Buffer.from(payload), {
+        contentType: 'application/json; charset=utf-8', forbidOverwrite: false, acl: 'public-read'
+      });
+      // Keep the historical fixed CDN object as a compatibility alias. It is
+      // not authoritative, so a concurrent stale alias cannot lose content.
+      await objectClient.upload(cloudPath, Buffer.from(payload), {
+        contentType: 'application/json; charset=utf-8', forbidOverwrite: false, acl: 'public-read'
+      }).catch(() => {});
+    } catch (error) {
+      throw failure('Public snapshot upload failed', 'SNAPSHOT_UPLOAD_FAILED', error?.status || 503);
     }
-    const uploadResponse = await request(target.uploadUrl, {
-      method: 'PUT',
-      headers: {
-        authorization: target.authorization,
-        'content-type': 'application/json; charset=utf-8',
-        'x-cos-security-token': target.token,
-        'x-cos-meta-fileid': target.cloudObjectMeta
-      },
-      body: payload
-    });
-    if (!uploadResponse.ok) throw failure('Public snapshot upload failed', 'SNAPSHOT_UPLOAD_FAILED', uploadResponse.status);
     return validated;
   }
 
