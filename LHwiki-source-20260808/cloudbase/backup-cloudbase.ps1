@@ -1,10 +1,14 @@
 ﻿[CmdletBinding()]
 param(
   [string]$ProjectRoot,
-  [int]$Keep = 30
+  [int]$Keep = 30,
+  [switch]$ConfirmPostgreSqlWakeup
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $ConfirmPostgreSqlWakeup) {
+  throw '历史 PostgreSQL 全量读取会产生高额核时。仅在明确需要归档/恢复核对时添加 -ConfirmPostgreSqlWakeup。'
+}
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
   $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }

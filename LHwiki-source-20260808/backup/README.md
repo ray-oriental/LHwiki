@@ -1,6 +1,14 @@
-# LHwiki 自动备份
+# LHwiki 历史 PostgreSQL 归档
 
-此目录由 `cloudbase/backup-cloudbase.ps1` 在开发或发布前手动写入并保留最近 30 份。指定电脑如需每日 03:30 计划任务，使用 `cloudbase/setup-backup.ps1 -EnableScheduledTask`；不要在多台电脑同时启用，已存在的 `LHwiki-CloudBase-Backup` 任务无需删除：
+此目录保留迁移前与人工维护时生成的完整 PostgreSQL 归档。在线投稿、草稿、审核和权限已经迁移到私有 COS，正常发布不再读取历史数据库。每日 PostgreSQL 备份任务已永久停用；各电脑如仍存在 `LHwiki-CloudBase-Backup`，应将其禁用或删除。
+
+只有明确需要恢复核对或重新归档时，才可在确认会产生数据库核时后运行：
+
+```powershell
+& '.\cloudbase\backup-cloudbase.ps1' -ConfirmPostgreSqlWakeup
+```
+
+脚本继续保留最近 30 份：
 
 - `lhwiki-YYYYMMDD-HHmmss.json`：完整业务数据，包括仅用户本人可见的云端草稿。
 - 同名 `.sha256`：完整性校验值。

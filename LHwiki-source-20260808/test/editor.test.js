@@ -255,7 +255,7 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
   assert.match(html, /styles\.css\?v=20260908-v088/);
-  assert.match(app, /draft-manager\.js\?v=20260907-v087/);
+  assert.match(app, /draft-manager\.js\?v=20260909-v0810c/);
   assert.match(app, /data-markdown-open/);
   assert.match(html, /theme\.js\?v=20260822-v085/);
   assert.match(html, /app\.js\?v=20260909-v0810/);
@@ -356,6 +356,41 @@ test('first manual save of a basic draft uses one cloud request', async () => {
     });
     await manager.saveNow();
     assert.deepEqual(calls, [['/api/drafts', 'POST']]);
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('submitting an unchanged cloud draft skips the redundant save request', async () => {
+  const calls = [];
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem() {}, setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({
+      api: async (path, options) => {
+        calls.push([path, options.method]);
+        return { submission: { id: 'submission-1' } };
+      },
+      userId: '202600043',
+      draftKey: 'new:test',
+      draft: {
+        id: 'draft-1', draftKey: 'new:test', targetType: 'new', targetId: null,
+        schemaVersion: 2, sectionSlug: '', contentType: '', title: '已保存标题', summary: '',
+        subject: '', authorLabel: '', anonymous: false, body: [], revision: 3,
+        updatedAt: new Date().toISOString()
+      }
+    });
+    manager.chooseInitial({ schemaVersion: 2, title: '已保存标题', body: [] });
+    await manager.submit();
+    assert.deepEqual(calls, [['/api/drafts/draft-1/submit', 'POST']]);
     manager.destroy();
   } finally {
     globalThis.window = originalWindow;

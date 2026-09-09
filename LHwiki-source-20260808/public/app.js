@@ -1,7 +1,7 @@
 import { formatDate } from './date.js';
 import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
-import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260907-v087';
+import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260909-v0810c';
 import { changelogPage } from './changelog.js?v=20260909-v0810a';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
 

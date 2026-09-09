@@ -77,48 +77,23 @@ API 集成测试同样包含在 `pnpm test` 中，完全使用本地 HTTP、虚�
 
 Cloudflare 回退版本的本地开发命令和密钥样例仍保留在 `package.json`、`.dev.vars.example` 与 `wrangler.jsonc` 中。CloudBase 生产部署不要把服务器 API Key 写入源码、前端或 `.env` 文件。
 
-## 自动备份
+## 历史数据库归档
 
-生产数据默认在开发或发布前手动导出到本项目的 `backup` 目录；只有指定的一台电脑启用 Windows 计划任务 `LHwiki-CloudBase-Backup`，避免重复备份：
+切换到私有 COS 工作流前已经完成全部 11 类数据的加密备份、逐类计数和内容哈希核验；原 PostgreSQL 数据继续只读保留。正常发布和日常运行不得再次读取该数据库，也不再创建 `LHwiki-CloudBase-Backup` 每日任务，以免每次全表读取产生多个五分钟 CPU 计费单位。
 
-```text
-D:\Workspace\codex project\LHwiki\campus-notes\backup
-```
-
-备份包括 `sections`、`articles`、`users`、`submissions`、`review_events`、`contributors`、`drafts`、`teacher_submissions` 和 `teacher_additions`。脚本采用分页读取、临时文件原子落盘、JSON 回读校验和 SHA-256 校验文件，保留最近 30 份。备份包含学号、未公开投稿和审核记录，严禁上传到公开仓库或公开网盘。
-
-手工备份：
+只有恢复核对或明确要求重新归档时，才可在受控电脑上显式运行：
 
 ```powershell
-& ".\cloudbase\backup-cloudbase.ps1"
+& '.\cloudbase\backup-cloudbase.ps1' -ConfirmPostgreSqlWakeup
 ```
 
-重新配置备份专用 API Key（默认仅配置手动备份）：
-
-```powershell
-& ".\cloudbase\setup-backup.ps1"
-```
-
-仅在承担每日任务的指定电脑上显式启用计划任务：
-
-```powershell
-& ".\cloudbase\setup-backup.ps1" -EnableScheduledTask
-```
-
-如果电脑只需要在开发或发布前手动备份，不应重复创建每日计划任务：
-
-```powershell
-& ".\cloudbase\setup-backup.ps1" -SkipScheduledTask
-```
-
-机器本地的备份凭据由 Windows DPAPI 加密，存放于 `%LOCALAPPDATA%\LHwiki`，不会同步进项目。维护日志和需要处理的告警写入 `backup\maintenance.log` 与 `backup\ATTENTION.txt`。完整恢复步骤见 [`backup/README.md`](backup/README.md)。
+脚本仍采用分页读取、临时文件原子落盘、JSON 回读和 SHA-256 校验，并保留最近 30 份。备份含学号、草稿、未公开投稿和审核记录，严禁上传到公开仓库或公开网盘。DPAPI 凭据与归档文件均不进入 Git；完整说明见 [`backup/README.md`](backup/README.md)。
 
 ## 安全与运维
 
 - 当前管理员登入逻辑按项目约定保持不变。
 - 学号格式只是一层校内初筛，不等同于强身份认证；公开署名不能视为学校认证的实名。
-- `lhwiki-api` 的服务器 API Key 仅存于云函数环境变量；运行 Key 和备份 Key 已分离，泄漏时可单独吊销。
-- 当前运行 Key 和备份 Key 均在 2027-08-08 到期；备份任务会在 30 天内到期时写入告警文件。轮换后需要分别更新云函数环境变量和本机 DPAPI 凭据。
+- `lhwiki-api` 正常运行只访问私有 COS 和公开快照，不使用 PostgreSQL API Key；历史归档凭据仅保存在受控电脑的 DPAPI 存储中。
 - 登录、投稿、编辑、审核和管理接口均有按 IP 的分钟级限流；账号投稿另有每日限制。当前限流是单实例内存限流，能抑制普通滥用，但不是分布式防护或专业 DDoS 清洗。
 - 公共目录与公开文章缓存 6 小时，缓存未命中时只读取公开白名单字段，数据库异常则回退部署快照；普通健康检查和暂停后的访问统计不访问数据库。草稿、投稿、审核和管理响应不缓存。
 - 禁止 HTML、图片和附件。编辑器输出受限结构化区块，服务端再次验证，浏览器只以文本节点渲染。

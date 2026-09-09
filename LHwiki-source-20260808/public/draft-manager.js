@@ -184,6 +184,12 @@ export class DraftManager {
   async saveNow() {
     this.persistLocal();
     if (!this.snapshot || this.conflicted) return null;
+    // A submit always asks for a save first. If the exact revision is already
+    // durable, avoid a second function/COS mutation before the submit call.
+    if (this.id && this.revision && this.sequence === this.savedSequence) {
+      this.setState('saved', this.updatedAt ? `已保存于 ${this.formatTime(this.updatedAt)}` : '已保存到云端');
+      return { id: this.id, revision: this.revision, updatedAt: this.updatedAt };
+    }
     if (!navigator.onLine) {
       this.setState('offline', '离线：已保存在这台设备');
       return null;

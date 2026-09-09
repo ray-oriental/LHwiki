@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
@@ -8,6 +9,7 @@ const cloudbaseContent = require('../cloudbase/functions/lhwiki-api/content.cjs'
 const { PRIMARY_KEYS, createPgStore } = require('../cloudbase/functions/lhwiki-api/pg-store.cjs');
 const { createPublicSnapshotStore } = require('../cloudbase/functions/lhwiki-api/public-snapshot-store.cjs');
 const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
+const { buildProductionFunction } = await import('../scripts/build-cloudbase-function.mjs');
 
 async function readApiSource() {
   const [app, server] = await Promise.all([
@@ -40,6 +42,57 @@ test('普通登录、管理员登录和会话恢复不会唤醒数据库', async
   assert.match(source, /async function ensurePersistentUser\(user\)/);
   assert.match(source, /auth\.user = await ensurePersistentUser\(auth\.user\)/);
   assert.doesNotMatch(source, /privilegedLoginUsers|PRIVILEGED_LOGIN_CACHE_TTL/);
+});
+
+test('production function package uses an exact allowlist and excludes every PostgreSQL maintenance artifact', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../cloudbase/function-production-files.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.functionName, 'lhwiki-api');
+  assert.equal(manifest.files.length, 13);
+  assert.equal(new Set(manifest.files).size, manifest.files.length);
+  assert.ok(manifest.files.includes('server.js'));
+  assert.ok(manifest.files.includes('cos-workflow-store.cjs'));
+  assert.ok(manifest.files.includes('public-snapshot.json'));
+  assert.equal(manifest.files.some(path => /pg-store|migration|backup|\.sql$|\.env/i.test(path)), false);
+
+  const workRoot = new URL('../work/', import.meta.url);
+  await mkdir(workRoot, { recursive: true });
+  const temporary = await mkdtemp(new URL('function-package-', workRoot));
+  try {
+    const outputDir = join(temporary, 'lhwiki-api');
+    const reportPath = join(temporary, 'package-manifest.json');
+    const report = await buildProductionFunction({ outputDir, reportPath });
+    const packaged = (await readdir(outputDir)).sort();
+    assert.deepEqual(packaged, [...manifest.files].sort());
+    assert.equal(report.files.length, manifest.files.length);
+    assert.equal(packaged.includes('pg-store.cjs'), false);
+    await assert.rejects(
+      () => buildProductionFunction({
+        outputDir: join(temporary, '..', '..', '..', 'escaped-package'),
+        reportPath
+      }),
+      /must be a child of the project root/
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test('legacy all-in-one deploy entry only prepares the safe allowlisted release', async () => {
+  const source = await readFile(new URL('../cloudbase/deploy-cloudbase.ps1', import.meta.url), 'utf8');
+  assert.match(source, /prepare-production-release\.ps1/);
+  assert.doesNotMatch(source, /db['"],\s*['"]nosql|permission['"],\s*['"]set|fn['"],\s*['"]deploy|CLOUDBASE_APIKEY|SESSION_SECRET/);
+});
+
+test('historical PostgreSQL backups require explicit confirmation and can never become a daily task', async () => {
+  const [backup, setup] = await Promise.all([
+    readFile(new URL('../cloudbase/backup-cloudbase.ps1', import.meta.url), 'utf8'),
+    readFile(new URL('../cloudbase/setup-backup.ps1', import.meta.url), 'utf8')
+  ]);
+  assert.match(backup, /\[switch\]\$ConfirmPostgreSqlWakeup/);
+  assert.match(backup, /if \(-not \$ConfirmPostgreSqlWakeup\)/);
+  assert.match(setup, /if \(\$EnableScheduledTask\)/);
+  assert.match(setup, /永久停用每日 PostgreSQL 备份任务/);
+  assert.doesNotMatch(setup, /Register-ScheduledTask|New-ScheduledTaskTrigger|New-ScheduledTaskAction/);
 });
 
 test('personal workspace batches three lists into one browser request', async () => {
