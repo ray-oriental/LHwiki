@@ -18,13 +18,15 @@ const {
 const COOKIE = 'campus_session';
 const PUBLIC_CACHE_TTL = 6 * 60 * 60_000;
 const ARTICLE_CACHE_TTL = 6 * 60 * 60_000;
-const PRIVILEGED_LOGIN_CACHE_TTL = 6 * 60 * 60_000;
+const SESSION_ROLES = new Set(['student', 'reviewer', 'admin']);
 const encoder = new TextEncoder();
 
 function createApp({
   store,
   seed = { sections: [], articles: [] },
   publicSnapshot = { sections: [], articles: [], contributors: [], teacherAdditions: [] },
+  publicSnapshotStore = null,
+  buildPublicSnapshot = null,
   sessionSecret = '',
   adminBootstrapCode = '',
   reviewerAccessCode = '',
@@ -49,8 +51,8 @@ function createApp({
   let seedPromise;
   let publicCache = null;
   let publicCachePromise = null;
-  let privilegedLoginCache = null;
-  let privilegedLoginPromise = null;
+  let publicSnapshotLoadedAt = null;
+  let publicSnapshotPromise = null;
   const articleCache = new Map();
   const mutationWindows = new Map();
 
@@ -70,11 +72,11 @@ function invalidatePublicCache() {
   articleCache.clear();
 }
 
-function snapshotBootstrap() {
-  const sections = publicSnapshot.sections.slice();
-  const articles = publicSnapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
-  const contributors = publicSnapshot.contributors.slice();
-  const teacherAdditions = publicSnapshot.teacherAdditions.slice();
+function snapshotBootstrap(snapshot = publicSnapshot) {
+  const sections = snapshot.sections.slice();
+  const articles = snapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
+  const contributors = snapshot.contributors.slice();
+  const teacherAdditions = snapshot.teacherAdditions.slice();
   sections.sort((a, b) => a.sort_order - b.sort_order);
   sortByDate(articles, 'published_at');
   return {
@@ -85,10 +87,30 @@ function snapshotBootstrap() {
   };
 }
 
+async function readStoredPublicSnapshot(force = false) {
+  if (!publicSnapshotStore?.load) return null;
+  if (!force && publicSnapshotLoadedAt !== null && clock() - publicSnapshotLoadedAt < PUBLIC_CACHE_TTL) return publicSnapshot;
+  if (!publicSnapshotPromise) publicSnapshotPromise = (async () => {
+    try {
+      publicSnapshot = await publicSnapshotStore.load();
+    } catch (err) {
+      logger.error?.(`public-snapshot-download-fallback:${safeDiagnostic(err)}`);
+    }
+    publicSnapshotLoadedAt = clock();
+    return publicSnapshot;
+  })().finally(() => { publicSnapshotPromise = null; });
+  return publicSnapshotPromise;
+}
+
 async function readPublicBootstrap(force = false) {
   if (!force && publicCache && clock() - publicCache.savedAt < PUBLIC_CACHE_TTL) return publicCache.value;
   if (!publicCachePromise) publicCachePromise = (async () => {
     let value;
+    if (publicSnapshotStore?.load) {
+      value = snapshotBootstrap(await readStoredPublicSnapshot(force));
+      publicCache = { savedAt: clock(), value };
+      return value;
+    }
     try {
       const [sections, articles, contributors, teacherAdditions] = await Promise.all([
         queryDocuments('sections', null, 100, 'slug,title,description,icon,sort_order'),
@@ -118,6 +140,14 @@ async function readPublicArticle(slug, force = false) {
   const cached = articleCache.get(slug);
   if (!force && cached && clock() - cached.savedAt < ARTICLE_CACHE_TTL) return cached.value;
   let value;
+  if (publicSnapshotStore?.load) {
+    const snapshot = await readStoredPublicSnapshot(force);
+    const article = snapshot.articles.find(item => item.slug === slug);
+    value = article ? { ...article, body_json: JSON.stringify(article.body) } : null;
+    articleCache.set(slug, { savedAt: clock(), value });
+    if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
+    return value;
+  }
   try {
     value = withoutId(await getDocument('articles', slug));
   } catch (err) {
@@ -128,6 +158,33 @@ async function readPublicArticle(slug, force = false) {
   articleCache.set(slug, { savedAt: clock(), value });
   if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
   return value;
+}
+
+async function syncPublicSnapshot(reason) {
+  if (!publicSnapshotStore?.save || typeof buildPublicSnapshot !== 'function') {
+    invalidatePublicCache();
+    return null;
+  }
+  try {
+    const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+      queryDocuments('sections', null, 100),
+      queryDocuments('articles', null, 2000),
+      queryDocuments('contributors', null, 2000),
+      queryDocuments('teacher_additions', null, 500)
+    ]);
+    const nextSnapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+    await publicSnapshotStore.save(nextSnapshot);
+    publicSnapshot = nextSnapshot;
+    publicSnapshotLoadedAt = clock();
+    publicCache = { savedAt: clock(), value: snapshotBootstrap(nextSnapshot) };
+    publicCachePromise = null;
+    articleCache.clear();
+    return true;
+  } catch (err) {
+    invalidatePublicCache();
+    logger.error?.(`public-snapshot-sync-failed:${reason}:${safeDiagnostic(err)}`);
+    return false;
+  }
 }
 
 async function ensureSeed() {
@@ -178,26 +235,8 @@ async function hmac(secret, value) {
 }
 
 async function makeSession(studentId, role, secret) {
-  const payload = b64url(JSON.stringify({ version: 2, studentId, role, exp: clock() + 7 * 86400_000 }));
+  const payload = b64url(JSON.stringify({ version: 3, studentId, role, exp: clock() + 7 * 86400_000 }));
   return `${payload}.${b64url(await hmac(secret, payload))}`;
-}
-
-async function privilegedLoginUsers() {
-  if (privilegedLoginCache && clock() - privilegedLoginCache.savedAt < PRIVILEGED_LOGIN_CACHE_TTL) {
-    return privilegedLoginCache.users;
-  }
-  if (!privilegedLoginPromise) privilegedLoginPromise = (async () => {
-    const rows = await queryDocuments('users', { role: { operator: 'neq', value: 'student' } }, 100);
-    const users = new Map(rows.map(row => [row.student_id, withoutId(row)]));
-    privilegedLoginCache = { savedAt: clock(), users };
-    return users;
-  })().finally(() => { privilegedLoginPromise = null; });
-  return privilegedLoginPromise;
-}
-
-function invalidatePrivilegedLoginCache() {
-  privilegedLoginCache = null;
-  privilegedLoginPromise = null;
 }
 
 function parseCookies(request) {
@@ -221,45 +260,27 @@ async function readSession(request) {
   if (difference !== 0) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!validLoginId(data.studentId) || data.exp < clock()) return null;
-    if (data.version === 2 && data.role === 'student' && data.studentId !== ADMIN_LOGIN_ID) {
-      return {
-        student_id: data.studentId,
-        role: 'student',
-        role_locked: 0,
-        created_at: now(),
-        last_login_at: now()
-      };
-    }
-    const stored = withoutId(await getDocument('users', data.studentId));
-    if (data.studentId !== ADMIN_LOGIN_ID) {
-      return stored ? { ...stored, __persistent: true } : {
-        student_id: data.studentId,
-        role: 'student',
-        role_locked: 0,
-        created_at: now(),
-        last_login_at: now()
-      };
-    }
+    if (![2, 3].includes(Number(data.version)) || !validLoginId(data.studentId) || data.exp < clock() || !SESSION_ROLES.has(data.role)) return null;
     const timestamp = now();
-    const protectedAdmin = {
-      ...stored,
-      student_id: ADMIN_LOGIN_ID,
-      role: 'admin',
+    return {
+      student_id: data.studentId,
+      role: data.studentId === ADMIN_LOGIN_ID ? 'admin' : data.role,
       role_locked: 0,
-      created_at: stored?.created_at || timestamp,
-      last_login_at: stored?.last_login_at || timestamp,
-      __persistent: true
+      created_at: timestamp,
+      last_login_at: timestamp
     };
-    if (!stored || stored.role !== 'admin' || stored.role_locked !== 0) {
-      const persistedAdmin = { ...protectedAdmin };
-      delete persistedAdmin.__persistent;
-      await setDocument('users', ADMIN_LOGIN_ID, persistedAdmin);
-    }
-    return protectedAdmin;
   } catch {
     return null;
   }
+}
+
+async function verifyPrivilegedSession(user) {
+  if (!user || user.role === 'student' || user.student_id === ADMIN_LOGIN_ID) return user;
+  const stored = withoutId(await getDocument('users', user.student_id));
+  if (!stored || stored.role_locked || !['reviewer', 'admin'].includes(stored.role)) {
+    return { ...user, role: 'student', role_locked: stored?.role_locked ? 1 : 0 };
+  }
+  return { ...stored, __persistent: true };
 }
 
 function sessionCookie(value, maxAge = 604800) {
@@ -458,8 +479,12 @@ async function validateDraftTarget(user, targetType, targetId, requestedDraftKey
 }
 
 async function requireUser(request, roles = []) {
-  const user = await readSession(request);
+  let user = await readSession(request);
   if (!user) return { response: error('请先登入', 401) };
+  // Signed student sessions stay database-free. Privileged claims are checked
+  // only when an explicit private operation reaches this guard, so revocation
+  // remains immediate without turning public page loads into PostgreSQL reads.
+  if (user.role !== 'student') user = await verifyPrivilegedSession(user);
   if (roles.length && !roles.includes(user.role)) return { response: error('没有所需权限', 403) };
   return { user };
 }
@@ -587,18 +612,19 @@ async function route(request) {
     const data = await readJson(request);
     const studentId = normalizeText(data?.studentId, 32);
     if (!validLoginId(studentId)) return error('抱歉，仅限本校学生编辑', 403);
-    const existing = studentId === ADMIN_LOGIN_ID
-      ? withoutId(await getDocument('users', studentId))
-      : (await privilegedLoginUsers()).get(studentId) || null;
+    const existingSession = await readSession(request);
+    const retainedRole = existingSession?.student_id === studentId && ['reviewer', 'admin'].includes(existingSession.role)
+      ? existingSession.role
+      : 'student';
     const timestamp = now();
     const user = studentId === ADMIN_LOGIN_ID
-      ? { ...existing, student_id: studentId, role: 'admin', role_locked: 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp }
-      : { student_id: studentId, role: existing?.role || 'student', role_locked: existing?.role_locked || 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp };
-    // Ordinary student sessions are stateless: a guessed-but-valid student ID must not
-    // amplify a login scan into a persistent database write. Privileged roles remain
-    // discoverable through their existing user row, while the protected administrator
-    // is still repaired and persisted on every login.
-    if (studentId === ADMIN_LOGIN_ID) await setDocument('users', studentId, user);
+      ? { student_id: studentId, role: 'admin', role_locked: 0, created_at: timestamp, last_login_at: timestamp }
+      : { student_id: studentId, role: retainedRole, role_locked: 0, created_at: timestamp, last_login_at: timestamp };
+    // Login is intentionally stateless. A scanner or an ordinary student must
+    // never wake PostgreSQL merely so the small privileged-account set can be
+    // discovered. Reviewers regain a lost/expired role with the existing access
+    // code; an unexpired signed session keeps its display role, while every
+    // privileged operation still verifies the current database row.
     const session = await makeSession(studentId, user.role, sessionSecret);
     return result({ user: publicUser(user) }, 200, { 'set-cookie': sessionCookie(session) });
   }
@@ -630,7 +656,6 @@ async function route(request) {
       last_login_at: timestamp
     };
     await setDocument('users', auth.user.student_id, updated);
-    invalidatePrivilegedLoginCache();
     const session = await makeSession(updated.student_id, updated.role, sessionSecret);
     return result({ user: publicUser(updated) }, 200, { 'set-cookie': sessionCookie(session) });
   }
@@ -770,6 +795,7 @@ async function route(request) {
     const timestamp = now();
     let id = draft.target_id;
     let slug = null;
+    let publicSnapshotSynced = null;
     if (draft.target_type === 'new') {
       id = draft.id;
       const recent = await queryDocuments('submissions', { student_id: auth.user.student_id });
@@ -794,12 +820,12 @@ async function route(request) {
       if (!article) return error('没有找到这篇已发布内容', 404);
       slug = article.slug;
       await setDocument('articles', article.slug, { ...article, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: timestamp });
-      invalidatePublicCache();
     } else {
       return error('草稿目标无效');
     }
     await deleteDocuments('drafts', { id: draft.id, student_id: auth.user.student_id });
-    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending' });
+    if (draft.target_type === 'article') publicSnapshotSynced = await syncPublicSnapshot('draft-article-publish');
+    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending', ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   if (method === 'GET' && path === '/api/submissions/mine') {
@@ -942,7 +968,6 @@ async function route(request) {
           approved_at: timestamp
         });
       }
-      invalidatePublicCache();
     }
     const status = action === 'approve' ? 'approved' : 'rejected';
     await setDocument('teacher_submissions', submission.id, {
@@ -953,7 +978,8 @@ async function route(request) {
       updated_at: timestamp,
       reviewed_at: timestamp
     });
-    return result({ ok: true, status });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('teacher-approval') : null;
+    return result({ ok: true, status, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const reviewMatch = path.match(/^\/api\/review\/([a-zA-Z0-9_-]+)$/);
@@ -984,8 +1010,8 @@ async function route(request) {
     const eventId = randomUUID();
     await setDocument('review_events', eventId, { id: eventId, submission_id: submission.id, reviewer_id: auth.user.student_id, action, note, created_at: now() });
     await setDocument('submissions', submission.id, { ...submission, status: statuses[action], review_note: note, updated_at: now() });
-    if (action === 'approve') invalidatePublicCache();
-    return result({ ok: true, status: statuses[action], slug });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('article-approval') : null;
+    return result({ ok: true, status: statuses[action], slug, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const adminArticleMatch = path.match(/^\/api\/admin\/articles\/(.+)$/);
@@ -999,16 +1025,16 @@ async function route(request) {
     if (!existing) return error('没有找到这篇已发布内容', 404);
     if (method === 'DELETE') {
       await deleteDocument('articles', slug);
-      invalidatePublicCache();
-      return result({ ok: true, slug });
+      const publicSnapshotSynced = await syncPublicSnapshot('admin-article-delete');
+      return result({ ok: true, slug, publicSnapshotSynced });
     }
     const prepared = await validateSubmission(await readJson(request));
     if (prepared.error) return error(prepared.error);
     const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
     const updated = { ...existing, slug, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: now() };
     await setDocument('articles', slug, updated);
-    invalidatePublicCache();
-    return result({ ok: true, article: mapArticle(updated) });
+    const publicSnapshotSynced = await syncPublicSnapshot('admin-article-update');
+    return result({ ok: true, article: mapArticle(updated), publicSnapshotSynced });
   }
 
   if (method === 'GET' && path === '/api/admin/users') {
@@ -1032,7 +1058,6 @@ async function route(request) {
     const existing = withoutId(await getDocument('users', studentId));
     const timestamp = now();
     await setDocument('users', studentId, { student_id: studentId, role, role_locked: role === 'student' ? 1 : 0, created_at: existing?.created_at || timestamp, last_login_at: existing?.last_login_at || timestamp });
-    invalidatePrivilegedLoginCache();
     return result({ ok: true });
   }
 

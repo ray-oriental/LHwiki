@@ -5,11 +5,14 @@ const { existsSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { createApp } = require('./api-app.cjs');
 const { createPgStore } = require('./pg-store.cjs');
-const { loadPublicSnapshot } = require('./public-snapshot.cjs');
+const { createPublicSnapshotStore } = require('./public-snapshot-store.cjs');
+const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('./public-snapshot.cjs');
 
 const DRAFT_CLIENT_VERSION = 4;
 const EMERGENCY_MAINTENANCE = false;
 const MAINTENANCE_REVIEW_DATE = '2026-09-07';
+const PUBLIC_SNAPSHOT_CLOUD_PATH = 'lhwiki-system/public-snapshot.json';
+const DEFAULT_PUBLIC_SNAPSHOT_URL = 'https://6c68-lhwiki-d9g6r8vfzc7be1c0a-1465088461.tcb.qcloud.la/lhwiki-system/public-snapshot.json';
 
 function loadSeed() {
   const migrationPath = join(__dirname, 'migration-data.private.json');
@@ -28,10 +31,19 @@ function createProductionApp(env = process.env) {
     snapshotPath: join(__dirname, 'public-snapshot.json'),
     seedPath: join(__dirname, 'seed-data.json')
   });
+  const publicSnapshotStore = createPublicSnapshotStore({
+    envId: env.TCB_ENV,
+    apiKey: env.CLOUDBASE_APIKEY,
+    publicUrl: env.PUBLIC_SNAPSHOT_URL || DEFAULT_PUBLIC_SNAPSHOT_URL,
+    cloudPath: env.PUBLIC_SNAPSHOT_CLOUD_PATH || PUBLIC_SNAPSHOT_CLOUD_PATH,
+    validate: validatePublicSnapshot
+  });
   return createApp({
     store,
     seed: loadSeed(),
     publicSnapshot,
+    publicSnapshotStore,
+    buildPublicSnapshot: data => fromBackup({ formatVersion: 1, exportedAt: new Date().toISOString(), data }),
     sessionSecret: env.SESSION_SECRET,
     adminBootstrapCode: env.ADMIN_BOOTSTRAP_CODE,
     reviewerAccessCode: env.REVIEWER_ACCESS_CODE,

@@ -6,6 +6,7 @@ import test from 'node:test';
 const require = createRequire(import.meta.url);
 const cloudbaseContent = require('../cloudbase/functions/lhwiki-api/content.cjs');
 const { PRIMARY_KEYS, createPgStore } = require('../cloudbase/functions/lhwiki-api/pg-store.cjs');
+const { createPublicSnapshotStore } = require('../cloudbase/functions/lhwiki-api/public-snapshot-store.cjs');
 const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
 
 async function readApiSource() {
@@ -23,18 +24,22 @@ test('CloudBase 后端沿用相同的登入规则', () => {
   assert.equal(cloudbaseContent.validLoginId('20260043'), false);
 });
 
-test('普通学生登入不会把学号扫描放大为数据库写入', async () => {
+test('普通登录、管理员登录和会话恢复不会唤醒数据库', async () => {
   const source = await readApiSource();
   assert.match(source, /if \(!origin\) return false/);
-  assert.match(source, /if \(studentId === ADMIN_LOGIN_ID\) await setDocument\('users', studentId, user\)/);
   assert.match(source, /enforceMutationRate\(request, 'login-sustained', 60, 15 \* 60_000\)/);
-  assert.match(source, /return stored \? \{ \.\.\.stored, __persistent: true \} : \{/);
-  assert.doesNotMatch(source, /\n\s*await setDocument\('users', studentId, user\);/);
+  const loginStart = source.indexOf("if (method === 'POST' && path === '/api/auth/login')");
+  const logoutStart = source.indexOf("if (method === 'POST' && path === '/api/auth/logout')", loginStart);
+  const loginSource = source.slice(loginStart, logoutStart);
+  assert.ok(loginStart > 0 && logoutStart > loginStart);
+  assert.doesNotMatch(loginSource, /getDocument\(|queryDocuments\(|setDocument\(|createDocument\(|updateDocuments\(/);
+  assert.match(loginSource, /const existingSession = await readSession\(request\)/);
+  assert.match(source, /version: 3/);
+  assert.match(source, /async function verifyPrivilegedSession\(user\)/);
+  assert.match(source, /const stored = withoutId\(await getDocument\('users', user\.student_id\)\)/);
   assert.match(source, /async function ensurePersistentUser\(user\)/);
   assert.match(source, /auth\.user = await ensurePersistentUser\(auth\.user\)/);
-  assert.match(source, /queryDocuments\('users', \{ role: \{ operator: 'neq', value: 'student' \} \}, 100\)/);
-  assert.match(source, /data\.version === 2 && data\.role === 'student'/);
-  assert.match(source, /const PRIVILEGED_LOGIN_CACHE_TTL = 6 \* 60 \* 60_000/);
+  assert.doesNotMatch(source, /privilegedLoginUsers|PRIVILEGED_LOGIN_CACHE_TTL/);
 });
 
 test('personal workspace batches three lists into one browser request', async () => {
@@ -42,8 +47,22 @@ test('personal workspace batches three lists into one browser request', async ()
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(server, /path === '\/api\/mine'/);
   assert.match(server, /Promise\.all\(\[\s*queryDocuments\('drafts'[\s\S]+queryDocuments\('submissions'[\s\S]+queryDocuments\('teacher_submissions'/);
-  assert.match(client, /const \{ submissions, drafts, teacherSubmissions = \[\] \} = await api\('\/api\/mine'\)/);
+  assert.match(client, /async function loadPrivateWorkspace\(\{ force = false \} = \{\}\)/);
+  assert.match(client, /const value = await api\('\/api\/mine'\)/);
+  assert.match(client, /const \{ submissions, drafts, teacherSubmissions = \[\] \} = await loadPrivateWorkspace\(\{ force \}\)/);
   assert.doesNotMatch(client, /Promise\.all\(\[\s*api\('\/api\/submissions\/mine'\)/);
+});
+
+test('opening the editor restores local work without reading PostgreSQL', async () => {
+  const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = client.indexOf('async function resolveWritingContext()');
+  const end = client.indexOf('async function contributePage()', start);
+  const resolver = client.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(resolver, /const existingNewDraft = findLocalDraft\(\{ targetType: 'new', targetId: null \}\)/);
+  assert.match(resolver, /if \(!draft\) draft = \(await loadPrivateWorkspace\(\)\)\.drafts\.find/);
+  assert.match(resolver, /if \(!submission\) submission = \(await loadPrivateWorkspace\(\)\)\.submissions\.find/);
+  assert.doesNotMatch(resolver, /const \{ drafts, submissions = \[\] \} = await api\('\/api\/mine'\)/);
 });
 
 test('生产稳定性巡检有明确的低并发和总请求预算', async () => {
@@ -51,12 +70,17 @@ test('生产稳定性巡检有明确的低并发和总请求预算', async () =>
   assert.match(source, /Math\.min\(4, Number\(process\.env\.LHWIKI_CONCURRENCY \|\| 2\)\)/);
   assert.match(source, /Math\.min\(5, Number\(process\.env\.LHWIKI_ROUNDS \|\| 2\)\)/);
   assert.match(source, /requestBudget > 30/);
+  const quickBaseline = source.slice(source.indexOf('const quickBaseline'), source.indexOf('const requestBudget'));
+  assert.doesNotMatch(quickBaseline, /\/api\/bootstrap/);
+  assert.match(source, /queue\.push\(\[origin, '\/api\/health', 'json'\]\)/);
 });
 
 test('生产写作冒烟使用当前草稿协议版本', async () => {
   const source = await readFile(new URL('../scripts/functional-smoke.mjs', import.meta.url), 'utf8');
   assert.match(source, /const draftClientVersion = 4/);
   assert.equal((source.match(/clientVersion: draftClientVersion/g) || []).length, 2);
+  assert.match(source, /process\.env\.LHWIKI_ORIGIN \|\| 'http:\/\/127\.0\.0\.1:9000'/);
+  assert.match(source, /LHWIKI_ALLOW_PRODUCTION_WRITES !== 'I_UNDERSTAND_THIS_WRITES_PRODUCTION'/);
 });
 
 test('CloudBase PostgreSQL adapter defines a stable primary key for every table', () => {
@@ -101,6 +125,40 @@ test('public seed fallback is independent from private migration data', () => {
   assert.ok(snapshot.articles.every(article => Array.isArray(article.body)));
 });
 
+test('public snapshot storage validates downloads and overwrites one fixed object', async () => {
+  const snapshot = validatePublicSnapshot({
+    schemaVersion: 1,
+    generatedAt: '2030-01-02T03:04:05.000Z',
+    sections: [{ slug: 'start', title: '开始', description: '测试', icon: '书', sort_order: 1 }],
+    articles: [], contributors: [], teacherAdditions: []
+  });
+  const calls = [];
+  const response = (status, data) => ({ ok: status >= 200 && status < 300, status, text: async () => typeof data === 'string' ? data : JSON.stringify(data) });
+  const store = createPublicSnapshotStore({
+    envId: 'example-env',
+    apiKey: 'server-key',
+    publicUrl: 'https://storage.example/public-snapshot.json',
+    validate: validatePublicSnapshot,
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body });
+      if (String(url) === 'https://storage.example/public-snapshot.json') return response(200, snapshot);
+      if (String(url).endsWith('/v1/storages/get-objects-upload-info')) return response(200, [{
+        uploadUrl: 'https://upload.example/object', authorization: 'signed-upload', token: 'temporary-token', cloudObjectMeta: 'object-meta'
+      }]);
+      if (String(url) === 'https://upload.example/object') return response(200, '');
+      return response(404, { code: 'NOT_FOUND' });
+    }
+  });
+  assert.deepEqual(await store.load(), snapshot);
+  assert.deepEqual(await store.save(snapshot), snapshot);
+  assert.equal(calls[1].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].body), [{ objectId: 'lhwiki-system/public-snapshot.json' }]);
+  assert.equal(calls[1].headers.authorization, 'Bearer server-key');
+  assert.equal(calls[2].method, 'PUT');
+  assert.equal(calls[2].headers.authorization, 'signed-upload');
+  assert.deepEqual(JSON.parse(calls[2].body), snapshot);
+});
+
 test('PostgreSQL adapter opens a 503 circuit at the per-instance request budget', async () => {
   let calls = 0;
   const store = createPgStore({
@@ -131,11 +189,13 @@ test('public browsing batches cache-miss reads and keeps a static outage fallbac
   const server = await readApiSource();
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(client, /const BOOTSTRAP_TTL = 6 \* 60 \* 60_000/);
-  assert.match(client, /const SESSION_TTL = 12 \* 60 \* 60_000/);
+  assert.match(client, /const SESSION_TTL = 7 \* 24 \* 60 \* 60_000/);
   assert.match(client, /readCache\(localStorage, BOOTSTRAP_CACHE_KEY, BOOTSTRAP_TTL\)/);
   assert.match(client, /await import\('\.\/teachers\.js\?v=20260810-directory-supplement-2'\)/);
-  assert.match(client, /readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
-  assert.match(client, /Promise\.all\(\[loadBootstrap\(\), loadSession\(\)\]\)/);
+  assert.match(client, /readCache\(localStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
+  assert.match(client, /const tabCache = readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\)/);
+  assert.doesNotMatch(client, /await api\('\/api\/session'\)/);
+  assert.match(client, /const session = await loadSession\(\);\s+const bootstrap = await loadBootstrap\(\);/);
   assert.match(server, /const PUBLIC_CACHE_TTL = 6 \* 60 \* 60_000/);
   assert.match(server, /const ARTICLE_CACHE_TTL = 6 \* 60 \* 60_000/);
   assert.match(server, /let publicCachePromise = null/);
@@ -309,7 +369,7 @@ test('emergency maintenance keeps private and mutation routes away from PostgreS
   assert.match(client, /const MAINTENANCE_MODE = false/);
   assert.match(client, /网站近期运行不稳定，暂时停用云端上传/);
   assert.match(client, /预计于 \$\{MAINTENANCE_REVIEW_DATE\} 恢复/);
-  assert.match(client, /readCache\(sessionStorage, SESSION_CACHE_KEY, SESSION_TTL\) \|\| \{ user: null, maintenance: true \}/);
+  assert.match(client, /return \{ user: null, maintenance: MAINTENANCE_MODE \}/);
 });
 
 test('in-memory mutation limiter has an absolute bucket cap', async () => {
