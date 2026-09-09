@@ -69,9 +69,10 @@ test('生产稳定性巡检有明确的低并发和总请求预算', async () =>
   const source = await readFile(new URL('../scripts/stability-check.mjs', import.meta.url), 'utf8');
   assert.match(source, /Math\.min\(4, Number\(process\.env\.LHWIKI_CONCURRENCY \|\| 2\)\)/);
   assert.match(source, /Math\.min\(5, Number\(process\.env\.LHWIKI_ROUNDS \|\| 2\)\)/);
-  assert.match(source, /requestBudget > 30/);
+  assert.match(source, /requestBudget > 20/);
+  assert.doesNotMatch(source, /\/api\/(?:bootstrap|session)/);
   const quickBaseline = source.slice(source.indexOf('const quickBaseline'), source.indexOf('const requestBudget'));
-  assert.doesNotMatch(quickBaseline, /\/api\/bootstrap/);
+  assert.match(quickBaseline, /\/api\/health/);
   assert.match(source, /queue\.push\(\[origin, '\/api\/health', 'json'\]\)/);
 });
 
