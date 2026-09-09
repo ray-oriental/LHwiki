@@ -125,7 +125,7 @@ test('public seed fallback is independent from private migration data', () => {
   assert.ok(snapshot.articles.every(article => Array.isArray(article.body)));
 });
 
-test('public snapshot storage validates downloads and overwrites one fixed object', async () => {
+test('public snapshot storage validates downloads and writes an immutable version plus compatibility alias', async () => {
   const snapshot = validatePublicSnapshot({
     schemaVersion: 1,
     generatedAt: '2030-01-02T03:04:05.000Z',
@@ -133,30 +133,26 @@ test('public snapshot storage validates downloads and overwrites one fixed objec
     articles: [], contributors: [], teacherAdditions: []
   });
   const calls = [];
+  const uploads = [];
   const response = (status, data) => ({ ok: status >= 200 && status < 300, status, text: async () => typeof data === 'string' ? data : JSON.stringify(data) });
   const store = createPublicSnapshotStore({
-    envId: 'example-env',
-    apiKey: 'server-key',
+    objectClient: { async upload(path, body, options) { uploads.push({ path, body: String(body), options }); } },
     publicUrl: 'https://storage.example/public-snapshot.json',
     validate: validatePublicSnapshot,
     fetchImpl: async (url, options = {}) => {
       calls.push({ url: String(url), method: options.method || 'GET', headers: options.headers, body: options.body });
       if (String(url) === 'https://storage.example/public-snapshot.json') return response(200, snapshot);
-      if (String(url).endsWith('/v1/storages/get-objects-upload-info')) return response(200, [{
-        uploadUrl: 'https://upload.example/object', authorization: 'signed-upload', token: 'temporary-token', cloudObjectMeta: 'object-meta'
-      }]);
-      if (String(url) === 'https://upload.example/object') return response(200, '');
       return response(404, { code: 'NOT_FOUND' });
     }
   });
   assert.deepEqual(await store.load(), snapshot);
   assert.deepEqual(await store.save(snapshot), snapshot);
-  assert.equal(calls[1].method, 'POST');
-  assert.deepEqual(JSON.parse(calls[1].body), [{ objectId: 'lhwiki-system/public-snapshot.json' }]);
-  assert.equal(calls[1].headers.authorization, 'Bearer server-key');
-  assert.equal(calls[2].method, 'PUT');
-  assert.equal(calls[2].headers.authorization, 'signed-upload');
-  assert.deepEqual(JSON.parse(calls[2].body), snapshot);
+  assert.equal(calls.length, 1);
+  assert.match(uploads[0].path, /^lhwiki-public-workflow-v2\/snapshots\/000000000000-[a-f0-9]{64}\.json$/);
+  assert.deepEqual(JSON.parse(uploads[0].body), snapshot);
+  assert.equal(uploads[0].options.forbidOverwrite, false);
+  assert.equal(uploads[0].options.acl, 'public-read');
+  assert.equal(uploads[1].path, 'lhwiki-system/public-snapshot.json');
 });
 
 test('PostgreSQL adapter opens a 503 circuit at the per-instance request budget', async () => {

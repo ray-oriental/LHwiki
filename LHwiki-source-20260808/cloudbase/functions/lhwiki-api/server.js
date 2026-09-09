@@ -1,10 +1,11 @@
 'use strict';
 
 const http = require('node:http');
-const { existsSync, readFileSync } = require('node:fs');
+const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { createApp } = require('./api-app.cjs');
-const { createPgStore } = require('./pg-store.cjs');
+const { createCosWorkflowStore } = require('./cos-workflow-store.cjs');
+const { createCloudBaseCosHttpClient } = require('./cloudbase-cos-http.cjs');
 const { createPublicSnapshotStore } = require('./public-snapshot-store.cjs');
 const { fromBackup, loadPublicSnapshot, validatePublicSnapshot } = require('./public-snapshot.cjs');
 
@@ -15,25 +16,41 @@ const PUBLIC_SNAPSHOT_CLOUD_PATH = 'lhwiki-system/public-snapshot.json';
 const DEFAULT_PUBLIC_SNAPSHOT_URL = 'https://6c68-lhwiki-d9g6r8vfzc7be1c0a-1465088461.tcb.qcloud.la/lhwiki-system/public-snapshot.json';
 
 function loadSeed() {
-  const migrationPath = join(__dirname, 'migration-data.private.json');
-  const seedPath = existsSync(migrationPath) ? migrationPath : join(__dirname, 'seed-data.json');
-  return JSON.parse(readFileSync(seedPath, 'utf8'));
+  return JSON.parse(readFileSync(join(__dirname, 'seed-data.json'), 'utf8'));
 }
 
 function createProductionApp(env = process.env) {
-  if (!env.TCB_ENV || !env.CLOUDBASE_APIKEY) {
-    throw new Error('Missing TCB_ENV or CLOUDBASE_APIKEY');
+  if (!env.TCB_ENV || !env.SESSION_SECRET) {
+    throw new Error('Missing TCB_ENV or SESSION_SECRET');
   }
-  const store = createPgStore({ envId: env.TCB_ENV, apiKey: env.CLOUDBASE_APIKEY });
+  const workflowObjectClient = createCloudBaseCosHttpClient({
+    bucket: env.LHWIKI_WORKFLOW_COS_BUCKET || env.LHWIKI_COS_BUCKET,
+    region: env.TENCENTCLOUD_REGION || 'ap-shanghai',
+    secretId: env.TENCENTCLOUD_SECRETID,
+    secretKey: env.TENCENTCLOUD_SECRETKEY,
+    securityToken: env.TENCENTCLOUD_SESSIONTOKEN
+  });
+  const store = createCosWorkflowStore({
+    objectClient: workflowObjectClient,
+    envId: env.TCB_ENV,
+    sessionSecret: env.SESSION_SECRET,
+    workflowSecret: env.WORKFLOW_STORE_SECRET,
+    prefix: env.WORKFLOW_STORE_PREFIX || 'lhwiki-workflow-v1'
+  });
   // Public routes intentionally load only this allowlisted snapshot. The fallback
-  // reads the checked-in seed, never migration-data.private.json or PostgreSQL.
+  // reads the checked-in seed, never private migration data or PostgreSQL.
   const publicSnapshot = loadPublicSnapshot({
     snapshotPath: join(__dirname, 'public-snapshot.json'),
     seedPath: join(__dirname, 'seed-data.json')
   });
   const publicSnapshotStore = createPublicSnapshotStore({
-    envId: env.TCB_ENV,
-    apiKey: env.CLOUDBASE_APIKEY,
+    objectClient: createCloudBaseCosHttpClient({
+      bucket: env.LHWIKI_PUBLIC_COS_BUCKET || env.LHWIKI_COS_BUCKET,
+      region: env.TENCENTCLOUD_REGION || 'ap-shanghai',
+      secretId: env.TENCENTCLOUD_SECRETID,
+      secretKey: env.TENCENTCLOUD_SECRETKEY,
+      securityToken: env.TENCENTCLOUD_SESSIONTOKEN
+    }),
     publicUrl: env.PUBLIC_SNAPSHOT_URL || DEFAULT_PUBLIC_SNAPSHOT_URL,
     cloudPath: env.PUBLIC_SNAPSHOT_CLOUD_PATH || PUBLIC_SNAPSHOT_CLOUD_PATH,
     validate: validatePublicSnapshot
