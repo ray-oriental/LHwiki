@@ -424,11 +424,13 @@ test('管理员可以校订待审核稿件但不会绕过审核或改变投稿�
   assert.match(migration, /'admin_edit'/);
 });
 
-test('公开文章读取不缓存旧正文，管理员保存后刷新仍保持更新', async () => {
+test('普通文章读取复用 HTTP 缓存，管理员保存后仍强制刷新正文', async () => {
   const server = await readApiSource();
   const client = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(server, /max-age=300, stale-while-revalidate=600/);
-  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}\$\{cacheBust\}`, \{ cache: 'no-store' \}\)/);
+  assert.match(server, /max-age=21600, stale-while-revalidate=604800/);
+  assert.match(client, /const articleOptions = cacheBust \? \{ cache: 'reload' \} : \{\};/);
+  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}\$\{cacheBust\}`, articleOptions\)/);
+  assert.match(client, /api\(`\/api\/articles\/\$\{encodeURIComponent\(slug\)\}`, \{ cache: 'no-store' \}\)/);
 });
 
 test('CloudBase 种子包含完整基础目录和文章', async () => {

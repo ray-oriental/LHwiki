@@ -490,7 +490,8 @@ async function articlePage(slug) {
   try {
     const cacheBust = state.articleCacheBust === slug ? `?refresh=${Date.now()}` : '';
     state.articleCacheBust = null;
-    const { article } = await api(`/api/articles/${encodeURIComponent(slug)}${cacheBust}`, { cache: 'no-store' });
+    const articleOptions = cacheBust ? { cache: 'reload' } : {};
+    const { article } = await api(`/api/articles/${encodeURIComponent(slug)}${cacheBust}`, articleOptions);
     const section = state.sections.find(item => item.slug === article.section_slug);
     const adminActions = state.user?.role === 'admin' ? `<div class="form-actions"><button class="button" type="button" data-admin-edit-article>编辑已发布稿件</button><button class="button danger" type="button" data-admin-delete-article>删除稿件</button></div>` : '';
     shell(`<div class="article-layout"><article><div class="breadcrumbs"><a href="#/">首页</a>　/　<a href="#/section/${esc(article.section_slug)}">${esc(section?.title || '')}</a></div>
