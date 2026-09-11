@@ -1,0 +1,194 @@
+/* 全部样式限定在 .gluhe-root 作用域内，避免污染宿主页面（LHwiki 嵌入） */
+.gluhe-root {
+  --gluhe-accent: #b03060;
+  --gluhe-ink: #2c3a4a;
+  --gluhe-panel: rgba(255, 255, 255, 0.86);
+  --gluhe-page: #fffdf8;
+  position: relative;
+  min-height: 100vh;
+  width: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  color: var(--gluhe-ink);
+  background: var(--gluhe-page);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.gluhe-root[data-theme="dark"] {
+  --gluhe-accent: #ef9b94;
+  --gluhe-ink: #f0efe9;
+  --gluhe-panel: rgba(41, 45, 42, 0.94);
+  --gluhe-page: #202321;
+  color-scheme: dark;
+}
+
+.gluhe-root * { box-sizing: border-box; }
+
+.gluhe-hud {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  flex-wrap: wrap;
+}
+
+.gluhe-hud .gluhe-stat {
+  background: var(--gluhe-panel);
+  border: 1px solid rgba(44, 58, 74, 0.12);
+  border-radius: 10px;
+  padding: 4px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 1px 3px rgba(44, 58, 74, 0.08);
+  white-space: nowrap;
+}
+
+.gluhe-hud .gluhe-stat b { font-size: 16px; }
+
+.gluhe-luhe-count b { color: var(--gluhe-accent); }
+
+.gluhe-hud .gluhe-spacer { flex: 1; }
+
+.gluhe-btn {
+  border: 1px solid rgba(44, 58, 74, 0.16);
+  background: var(--gluhe-panel);
+  color: var(--gluhe-ink);
+  border-radius: 10px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(44, 58, 74, 0.08);
+}
+.gluhe-btn:hover { background: #fff; }
+.gluhe-btn:active { transform: translateY(1px); }
+
+.gluhe-stage {
+  position: relative;
+  width: 100%;
+}
+
+.gluhe-stage canvas.gluhe-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  touch-action: none;
+  box-shadow: 0 6px 24px rgba(44, 58, 74, 0.16);
+}
+
+/* Next 预览球 */
+.gluhe-next {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: var(--gluhe-panel);
+  border: 1px solid rgba(44, 58, 74, 0.12);
+  border-radius: 12px;
+  padding: 6px 8px 4px;
+  text-align: center;
+  font-size: 11px;
+  box-shadow: 0 1px 4px rgba(44, 58, 74, 0.1);
+  pointer-events: none;
+}
+.gluhe-next img { display: block; width: 44px; height: 44px; object-fit: contain; }
+
+/* 潞河事件：全屏特效层（覆盖视口，突破游戏画布边界感） */
+.gluhe-fx-layer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.gluhe-dim {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 22, 0);
+  transition: background 0.45s ease;
+  pointer-events: none;
+  z-index: 9998;
+}
+.gluhe-dim.on { background: rgba(10, 14, 22, 0.42); }
+
+.gluhe-heavy-text {
+  position: fixed;
+  left: 0; right: 0;
+  top: 18%;
+  text-align: center;
+  font-size: clamp(40px, 9vw, 84px);
+  font-weight: 800;
+  color: #f5e9d0;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.55);
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  z-index: 10000;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.gluhe-heavy-text.on { opacity: 1; }
+
+/* Game Over / 确认弹层 */
+.gluhe-modal-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 28, 40, 0.55);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+}
+.gluhe-modal {
+  background: #fff;
+  border-radius: 16px;
+  padding: 22px 26px;
+  width: min(84%, 340px);
+  text-align: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.gluhe-modal h2 {
+  margin: 0 0 10px;
+  font-size: 22px;
+  color: var(--gluhe-accent);
+}
+.gluhe-modal .gluhe-final-score { font-size: 34px; font-weight: 800; margin: 4px 0 10px; }
+.gluhe-modal table { margin: 0 auto 14px; font-size: 13px; border-collapse: collapse; }
+.gluhe-modal td { padding: 2px 8px; text-align: left; }
+.gluhe-modal td:last-child { text-align: right; font-weight: 700; }
+.gluhe-modal .gluhe-btn { margin: 0 4px; font-size: 14px; padding: 8px 18px; }
+.gluhe-modal .gluhe-btn.primary {
+  background: var(--gluhe-accent);
+  border-color: var(--gluhe-accent);
+  color: #fff;
+}
+.gluhe-footer {
+  text-align: center;
+  font-size: 11px;
+  color: rgba(44, 58, 74, 0.5);
+  padding: 6px 0 10px;
+}
+
+.gluhe-root[data-theme="dark"] .gluhe-hud .gluhe-stat,
+.gluhe-root[data-theme="dark"] .gluhe-btn,
+.gluhe-root[data-theme="dark"] .gluhe-next {
+  border-color: #555a54;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .28);
+}
+.gluhe-root[data-theme="dark"] .gluhe-btn:hover { background: #3a403b; }
+.gluhe-root[data-theme="dark"] .gluhe-btn.primary { color: #241f20; background: #ef9b94; border-color: #ef9b94; }
+.gluhe-root[data-theme="dark"] .gluhe-footer { color: rgba(240, 239, 233, .58); }
+.gluhe-root[data-theme="dark"] .gluhe-modal-mask { background: rgba(7, 10, 12, .7); }
+.gluhe-root[data-theme="dark"] .gluhe-modal { color: var(--gluhe-ink); background: #292d2a; box-shadow: 0 16px 48px rgba(0, 0, 0, .45); }
+
+@media (prefers-reduced-motion: reduce) {
+  .gluhe-root *, .gluhe-root *::before, .gluhe-root *::after {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

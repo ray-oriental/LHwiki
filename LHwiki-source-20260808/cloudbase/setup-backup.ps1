@@ -1,15 +1,21 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [string]$EnvId = 'lhwiki-d9g6r8vfzc7be1c0a',
   [SecureString]$ApiKey,
   [datetime]$ApiKeyExpiresAt = '2027-08-08T00:00:00+08:00',
   [string]$DailyAt = '03:30',
   [switch]$EnableScheduledTask,
-  [switch]$SkipScheduledTask
+  [switch]$SkipScheduledTask,
+  [switch]$ConfirmPostgreSqlWakeup
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $ApiKey) { $ApiKey = Read-Host '请输入专用于本机备份的 CloudBase API Key' -AsSecureString }
+if ($EnableScheduledTask) {
+  throw '已永久停用每日 PostgreSQL 备份任务；在线工作流使用私有 COS，历史数据库只能按明确需要人工归档。'
+}
+if ($EnvId -ne 'lhwiki-d9g6r8vfzc7be1c0a') { throw '备份凭据必须属于 LHwiki 正式环境。' }
+if (-not $ApiKey) { $ApiKey = Read-Host '请输入专用于人工历史归档的 CloudBase API Key' -AsSecureString }
+
 $LocalRoot = Join-Path $env:LOCALAPPDATA 'LHwiki'
 $CredentialPath = Join-Path $LocalRoot 'backup-api-key.clixml'
 $SettingsPath = Join-Path $LocalRoot 'backup-settings.json'
@@ -25,24 +31,15 @@ $credential | Export-Clixml -LiteralPath $CredentialPath
   environmentExpiresAt = '2027-02-07T23:59:59+08:00'
   apiKeyExpiresAt = $ApiKeyExpiresAt.ToString('o')
   configuredAt = (Get-Date).ToString('o')
+  scheduledBackup = $false
 } | ConvertTo-Json | Set-Content -LiteralPath $SettingsPath -Encoding UTF8
 
-if ($EnableScheduledTask -and $SkipScheduledTask) { throw '不能同时指定 -EnableScheduledTask 和 -SkipScheduledTask。' }
-if ($EnableScheduledTask -and -not $SkipScheduledTask) {
-  $time = [datetime]::ParseExact($DailyAt, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
-  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$BackupScript`""
-  $trigger = New-ScheduledTaskTrigger -Daily -At $time
-  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
-  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName 'LHwiki-CloudBase-Backup' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description '每日备份 LHwiki CloudBase PostgreSQL 到项目 backup 文件夹，并执行健康与到期检查。' -Force | Out-Null
+if ($ConfirmPostgreSqlWakeup) {
+  & $BackupScript -ProjectRoot $ProjectRoot -ConfirmPostgreSqlWakeup
 }
-
-& $BackupScript -ProjectRoot $ProjectRoot
-if (-not $EnableScheduledTask -or $SkipScheduledTask) {
-  Write-Host '已配置本机手动备份；未创建每日计划任务。'
-} else {
-  Write-Host '已启用每日自动备份：LHwiki-CloudBase-Backup'
+Write-Host '已配置本机人工归档凭据；不会创建每日计划任务。'
+if (-not $ConfirmPostgreSqlWakeup) {
+  Write-Host '本次未连接历史 PostgreSQL。需要新归档时，请明确添加 -ConfirmPostgreSqlWakeup。'
 }
 Write-Host "备份位置：$(Join-Path $ProjectRoot 'backup')"
 Write-Host "凭据使用 Windows DPAPI 加密保存在：$CredentialPath"
-

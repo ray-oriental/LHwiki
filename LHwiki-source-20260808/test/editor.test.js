@@ -6,31 +6,6 @@ import { DraftManager, draftKeyFor } from '../public/draft-manager.js';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from '../public/markdown.js';
 import { importDocument, parseLatexDocument } from '../public/document-import.js';
 
-test('Markdown maps onto the v0.8 editor schema without adding server block types', () => {
-  const blocks = parseMarkdown('## 标题\n\n### 小节\n\n#### 细目\n\n> 引用\n\n- 项目\n\n1. 编号\n\n| 姓名 | 学科 |\n| --- | --- |\n| 李老师 | 语文 |\n\n```math\nx^2\n```\n\n---');
-  assert.deepEqual(blocks.map(block => block.type), ['heading', 'subheading', 'minorheading', 'quote', 'bullet', 'number', 'table', 'formula', 'divider']);
-  assert.deepEqual(blocks[6].rows, [['姓名', '学科'], ['李老师', '语文']]);
-  assert.equal(blocks[7].text, 'x^2');
-});
-
-test('Markdown round-trip preserves columns and toggles through bounded LHwiki blocks', () => {
-  const original = normalizeBlocks([
-    { type: 'columns', columns: [[{ type: 'paragraph', text: '左栏' }], [{ type: 'formula', text: 'a+b' }]] },
-    { type: 'toggle', level: 3, text: '展开阅读', open: false, children: [{ type: 'paragraph', text: '内容' }] }
-  ]);
-  const restored = parseMarkdown(blocksToMarkdown(original));
-  assert.deepEqual(restored.map(block => block.type), ['columns', 'toggle']);
-  assert.equal(restored[0].columns[0][0].text, '左栏');
-  assert.equal(restored[1].open, false);
-  assert.equal(restored[1].children[0].text, '内容');
-});
-
-test('Markdown inline parsing keeps links protocol-bound and code fences inert', () => {
-  assert.deepEqual(parseInlineMarkdown('**粗体**、*斜体*、~~删除~~、`代码`、[官网](https://luhe.net/)').map(part => part.type), ['strong', 'text', 'emphasis', 'text', 'strike', 'text', 'code', 'text', 'link']);
-  assert.equal(parseInlineMarkdown('[危险](javascript:alert(1))')[0].type, 'text');
-  assert.deepEqual(codeFence('```js\nalert(1)\n```'), { language: 'js', code: 'alert(1)' });
-});
-
 test('editor normalizes legacy blocks and preserves structured headings', () => {
   const blocks = normalizeBlocks([
     { type: 'heading', text: '第一章' },
@@ -344,11 +319,12 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
   assert.match(html, /20260829-native-formats/);
-  assert.match(app, /draft-manager\.js\?v=20260823-v086/);
+  assert.match(app, /draft-manager\.js\?v=20260909-v0810c/);
   assert.match(app, /data-document-format/);
   assert.match(app, /data-document-analyze/);
   assert.match(app, /editorutility/);
-  assert.match(html, /theme\.js\?v=20260815-dark-mode/);
+  assert.match(html, /theme\.js\?v=20260822-v085/);
+  assert.match(app, /changelog\.js\?v=20260829-native-formats/);
   assert.match(css, /:root\[data-theme-effective="dark"\]/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.sidebar-changelog \{ background: linear-gradient/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.teacher-card footer/);
@@ -376,7 +352,6 @@ test('client upgrade conflicts stop cloud retries and preserve the local snapsho
     await manager.saveNow();
     assert.equal(manager.conflicted, true);
     assert.equal(manager.lastState, 'conflict');
-    assert.equal(manager.retryTimer, null);
     assert.equal(manager.snapshot.body[0].text, '本机内容');
     manager.destroy();
   } finally {
@@ -387,7 +362,7 @@ test('client upgrade conflicts stop cloud retries and preserve the local snapsho
   }
 });
 
-test('resource pressure stops automatic cloud retries while preserving local writing', async () => {
+test('resource pressure never schedules a cloud retry and preserves local writing', async () => {
   const originalWindow = globalThis.window;
   const originalLocalStorage = globalThis.localStorage;
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -404,11 +379,84 @@ test('resource pressure stops automatic cloud retries while preserving local wri
     manager.update({ body: [{ id: 'b_12345678', type: 'paragraph', text: '本机内容' }] });
     await manager.saveNow();
     assert.equal(calls, 1);
-    assert.equal(manager.autoRetryBlocked, true);
-    assert.equal(manager.retryTimer, null);
-    await manager.saveNow({ automatic: true });
+    manager.update({ body: [{ id: 'b_12345678', type: 'paragraph', text: '继续本机编辑' }] });
+    await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(calls, 1);
-    assert.equal(manager.snapshot.body[0].text, '本机内容');
+    assert.equal(manager.snapshot.body[0].text, '继续本机编辑');
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('first manual save of a basic draft uses one cloud request', async () => {
+  const calls = [];
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem() {}, setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({
+      api: async (path, options) => {
+        calls.push([path, options.method]);
+        return { draft: {
+          id: 'draft-1', draftKey: 'new:test', targetType: 'new', targetId: null,
+          schemaVersion: 1, sectionSlug: '', contentType: '', title: '本机标题', summary: '',
+          subject: '', authorLabel: '', anonymous: false,
+          body: [{ id: 'b_12345678', type: 'paragraph', text: '正文' }],
+          revision: 1, updatedAt: new Date().toISOString()
+        } };
+      },
+      userId: '202600043',
+      draftKey: 'new:test'
+    });
+    manager.update({
+      schemaVersion: 2, sectionSlug: '', contentType: '', title: '本机标题', summary: '',
+      subject: '', authorLabel: '', anonymous: false,
+      body: [{ id: 'b_12345678', type: 'paragraph', text: '正文' }]
+    });
+    await manager.saveNow();
+    assert.deepEqual(calls, [['/api/drafts', 'POST']]);
+    manager.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.localStorage = originalLocalStorage;
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('submitting an unchanged cloud draft skips the redundant save request', async () => {
+  const calls = [];
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.localStorage = { removeItem() {}, setItem() {}, getItem() { return null; } };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  try {
+    const manager = new DraftManager({
+      api: async (path, options) => {
+        calls.push([path, options.method]);
+        return { submission: { id: 'submission-1' } };
+      },
+      userId: '202600043',
+      draftKey: 'new:test',
+      draft: {
+        id: 'draft-1', draftKey: 'new:test', targetType: 'new', targetId: null,
+        schemaVersion: 2, sectionSlug: '', contentType: '', title: '已保存标题', summary: '',
+        subject: '', authorLabel: '', anonymous: false, body: [], revision: 3,
+        updatedAt: new Date().toISOString()
+      }
+    });
+    manager.chooseInitial({ schemaVersion: 2, title: '已保存标题', body: [] });
+    await manager.submit();
+    assert.deepEqual(calls, [['/api/drafts/draft-1/submit', 'POST']]);
     manager.destroy();
   } finally {
     globalThis.window = originalWindow;

@@ -5,6 +5,8 @@ import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const { createApp } = require('../cloudbase/functions/lhwiki-api/api-app.cjs');
+const { createCosWorkflowStore, createFakeObjectClient } = require('../cloudbase/functions/lhwiki-api/cos-workflow-store.cjs');
+const { fromBackup } = require('../cloudbase/functions/lhwiki-api/public-snapshot.cjs');
 const { createMemoryStore } = require('./helpers/memory-store.cjs');
 
 const SESSION_SECRET = 'lhwiki-local-integration-session-secret-0001';
@@ -45,9 +47,10 @@ function submissionInput(overrides = {}) {
   return validSnapshot(overrides);
 }
 
-async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
-  const store = createMemoryStore(data);
+async function createHarness({ data = fixtureData(), store: suppliedStore = null, appOptions = {} } = {}) {
+  const store = suppliedStore || createMemoryStore(data);
   let sequence = 0;
+  let idempotencySequence = 0;
   const errors = [];
   const app = createApp({
     store,
@@ -73,9 +76,12 @@ async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
   function client() {
     let cookie = '';
     return {
-      async request(path, { method = 'GET', body, cookie: cookieOverride, requestOrigin = origin } = {}) {
+      async request(path, { method = 'GET', body, cookie: cookieOverride, requestOrigin = origin, idempotencyKey } = {}) {
         const headers = { accept: 'application/json' };
         if (!['GET', 'HEAD'].includes(method) && requestOrigin !== null) headers.origin = requestOrigin;
+        if (!['GET', 'HEAD'].includes(method) && !['/api/auth/login', '/api/auth/logout', '/api/visits'].includes(path)) {
+          headers['idempotency-key'] = idempotencyKey || `fixture-idempotency-${++idempotencySequence}`;
+        }
         const sentCookie = cookieOverride === undefined ? cookie : cookieOverride;
         if (sentCookie) headers.cookie = sentCookie;
         if (body !== undefined) headers['content-type'] = 'application/json';
@@ -90,6 +96,9 @@ async function createHarness({ data = fixtureData(), appOptions = {} } = {}) {
       },
       async login(studentId) {
         return this.request('/api/auth/login', { method: 'POST', body: { studentId } });
+      },
+      async elevate(code = 'reviewer-fixture-code') {
+        return this.request('/api/auth/access', { method: 'POST', body: { code } });
       },
       cookie() { return cookie; }
     };
@@ -142,6 +151,22 @@ test('login, signed session, origin validation and logout run entirely locally',
   });
 });
 
+test('ordinary logins and signed session restoration do not read the users table', async () => {
+  await useHarness({}, async ({ store, client }) => {
+    store.failNext('queryDocuments', 'users', new Error('login must not scan privileged users'));
+    const first = client();
+    assert.equal((await first.login(STUDENT_ID)).status, 200);
+
+    const second = client();
+    assert.equal((await second.login(OTHER_ID)).status, 200);
+
+    store.failNext('getDocument', 'users', new Error('student session should be database-free'));
+    const session = await first.request('/api/session');
+    assert.equal(session.status, 200);
+    assert.equal(session.data.user.role, 'student');
+  });
+});
+
 test('draft CRUD enforces ownership and optimistic revision conflicts over HTTP', async () => {
   await useHarness({}, async ({ client, store }) => {
     const owner = client();
@@ -151,22 +176,30 @@ test('draft CRUD enforces ownership and optimistic revision conflicts over HTTP'
 
     const created = await owner.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '' }) }
+      body: { clientVersion: 4, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '' }) }
     });
     assert.equal(created.status, 201);
     assert.equal(created.data.draft.revision, 1);
     const draftId = created.data.draft.id;
     assert.equal((await owner.request('/api/drafts/mine')).data.drafts.length, 1);
 
+    const duplicateWithoutRevision = await owner.request('/api/drafts', {
+      method: 'POST',
+      body: { clientVersion: 4, draftKey: 'new:fixture_draft_001', targetType: 'new', snapshot: validSnapshot({ title: '另一标签页' }) }
+    });
+    assert.equal(duplicateWithoutRevision.status, 409);
+    assert.equal(duplicateWithoutRevision.data.conflict.revision, 1);
+    assert.equal(store.inspect('drafts')[0].title, '');
+
     const updated = await owner.request(`/api/drafts/${draftId}`, {
       method: 'PUT',
-      body: { clientVersion: 3, expectedRevision: 1, snapshot: validSnapshot({ title: '第二版测试投稿' }) }
+      body: { clientVersion: 4, expectedRevision: 1, snapshot: validSnapshot({ title: '第二版测试投稿' }) }
     });
     assert.equal(updated.data.draft.revision, 2);
 
     const stale = await owner.request(`/api/drafts/${draftId}`, {
       method: 'PUT',
-      body: { clientVersion: 3, expectedRevision: 1, snapshot: validSnapshot({ title: '过期页面修改' }) }
+      body: { clientVersion: 4, expectedRevision: 1, snapshot: validSnapshot({ title: '过期页面修改' }) }
     });
     assert.equal(stale.status, 409);
     assert.equal(stale.data.conflict.revision, 2);
@@ -186,14 +219,15 @@ test('draft submission, requested changes, resubmission and approval form one co
     const reviewer = client();
     await student.login(STUDENT_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
 
     const draft = await student.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, draftKey: 'new:fixture_submit_001', targetType: 'new', snapshot: validSnapshot() }
+      body: { clientVersion: 4, draftKey: 'new:fixture_submit_001', targetType: 'new', snapshot: validSnapshot() }
     });
     const draftId = draft.data.draft.id;
     const submitted = await student.request(`/api/drafts/${draftId}/submit`, {
-      method: 'POST', body: { clientVersion: 3, expectedRevision: 1 }
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
     });
     assert.deepEqual(submitted.data, { ok: true, id: draftId, slug: null, status: 'pending' });
     assert.equal(store.inspect('drafts').length, 0);
@@ -212,11 +246,11 @@ test('draft submission, requested changes, resubmission and approval form one co
 
     const revisionDraft = await student.request('/api/drafts', {
       method: 'POST',
-      body: { clientVersion: 3, targetType: 'submission', targetId: draftId, snapshot: validSnapshot({ title: '补充后的测试投稿' }) }
+      body: { clientVersion: 4, targetType: 'submission', targetId: draftId, snapshot: validSnapshot({ title: '补充后的测试投稿' }) }
     });
     const revisionDraftId = revisionDraft.data.draft.id;
     const resubmitted = await student.request(`/api/drafts/${revisionDraftId}/submit`, {
-      method: 'POST', body: { clientVersion: 3, expectedRevision: 1 }
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
     });
     assert.equal(resubmitted.data.status, 'pending');
     assert.equal(store.inspect('submissions')[0].review_note, '');
@@ -227,9 +261,105 @@ test('draft submission, requested changes, resubmission and approval form one co
     assert.equal(approved.status, 200);
     assert.equal(approved.data.status, 'approved');
     assert.equal(store.inspect('articles').length, 1);
+    const publicBootstrap = await client().request('/api/bootstrap?refresh=1');
+    assert.equal(publicBootstrap.data.articles[0].title, '补充后的测试投稿');
+    const publicArticle = await client().request(`/api/articles/${encodeURIComponent(approved.data.slug)}?refresh=1`);
+    assert.equal(publicArticle.data.article.title, '补充后的测试投稿');
     assert.equal(store.inspect('review_events').filter(event => event.submission_id === draftId).length, 2);
     assert.ok(store.inspect('contributors').find(item => item.student_id === STUDENT_ID)?.approved_at);
     assert.equal((await reviewer.request(`/api/review/${draftId}`, { method: 'POST', body: { action: 'approve' } })).status, 409);
+  });
+});
+
+test('approval publishes an allowlisted persistent snapshot without changing the review workflow', async () => {
+  let remoteSnapshot = fromBackup({
+    formatVersion: 1,
+    exportedAt: new Date(FIXED_TIME - 1000).toISOString(),
+    data: { sections: fixtureData().sections, articles: [], contributors: [], teacher_additions: [] }
+  });
+  let saves = 0;
+  const publicSnapshotStore = {
+    async load() { return structuredClone(remoteSnapshot); },
+    async save(snapshot) { saves += 1; remoteSnapshot = structuredClone(snapshot); return snapshot; }
+  };
+  const buildPublicSnapshot = data => fromBackup({ formatVersion: 1, exportedAt: new Date(FIXED_TIME).toISOString(), data });
+  await useHarness({ appOptions: { publicSnapshotStore, buildPublicSnapshot } }, async ({ client }) => {
+    const student = client();
+    const reviewer = client();
+    await student.login(STUDENT_ID);
+    await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
+    const draft = await student.request('/api/drafts', {
+      method: 'POST', body: { clientVersion: 4, draftKey: 'new:persistent_snapshot', targetType: 'new', snapshot: validSnapshot() }
+    });
+    await student.request(`/api/drafts/${draft.data.draft.id}/submit`, {
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
+    });
+    const approved = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', body: { action: 'approve', note: '' }
+    });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.data.publicSnapshotSynced, true);
+    assert.equal(saves, 1);
+    assert.equal(remoteSnapshot.articles.length, 1);
+    assert.deepEqual(Object.keys(remoteSnapshot.articles[0]).sort(), ['author_label', 'body', 'content_type', 'published_at', 'section_slug', 'slug', 'subject', 'summary', 'title', 'updated_at'].sort());
+    const publicArticle = await client().request(`/api/articles/${encodeURIComponent(approved.data.slug)}?refresh=1`);
+    assert.equal(publicArticle.data.article.title, '完整测试投稿');
+  });
+});
+
+test('failed public snapshot publish returns an error and the same idempotency key reconciles without duplicate approval', async () => {
+  const objects = createFakeObjectClient();
+  const workflowStore = createCosWorkflowStore({
+    objectClient: objects,
+    envId: 'test',
+    secret: 'integration-workflow-secret-which-is-long-enough-123456',
+    initialData: fixtureData(),
+    clock: () => FIXED_TIME
+  });
+  let saves = 0;
+  let remoteSnapshot = fromBackup({
+    formatVersion: 1,
+    exportedAt: new Date(FIXED_TIME - 1000).toISOString(),
+    data: { sections: fixtureData().sections, articles: [], contributors: [], teacher_additions: [] }
+  });
+  const publicSnapshotStore = {
+    async load() { return structuredClone(remoteSnapshot); },
+    async save(snapshot) {
+      saves += 1;
+      if (saves === 1) throw Object.assign(new Error('injected snapshot outage'), { code: 'UPLOAD_FAILED', status: 503 });
+      remoteSnapshot = structuredClone(snapshot);
+      return snapshot;
+    }
+  };
+  const buildPublicSnapshot = data => fromBackup({ formatVersion: 1, exportedAt: new Date(FIXED_TIME).toISOString(), data });
+  await useHarness({ store: workflowStore, appOptions: { publicSnapshotStore, buildPublicSnapshot } }, async ({ client }) => {
+    const student = client();
+    const reviewer = client();
+    await student.login(STUDENT_ID);
+    await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
+    const draft = await student.request('/api/drafts', {
+      method: 'POST', body: { clientVersion: 4, draftKey: 'new:snapshot_recovery', targetType: 'new', snapshot: validSnapshot() }
+    });
+    await student.request(`/api/drafts/${draft.data.draft.id}/submit`, {
+      method: 'POST', body: { clientVersion: 4, expectedRevision: 1 }
+    });
+    const approvalKey = 'approval-snapshot-recovery-key';
+    const failed = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', idempotencyKey: approvalKey, body: { action: 'approve', note: '' }
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(remoteSnapshot.articles.length, 0);
+
+    const recovered = await reviewer.request(`/api/review/${draft.data.draft.id}`, {
+      method: 'POST', idempotencyKey: approvalKey, body: { action: 'approve', note: '' }
+    });
+    assert.equal(recovered.status, 200);
+    assert.equal(recovered.data.publicSnapshotSynced, true);
+    assert.equal(remoteSnapshot.articles.length, 1);
+    assert.equal((await workflowStore.queryDocuments('articles')).length, 1);
+    assert.equal((await workflowStore.queryDocuments('review_events')).filter(event => event.submission_id === draft.data.draft.id).length, 1);
   });
 });
 
@@ -249,6 +379,7 @@ test('role matrix protects review, cross-owner editing and administrator operati
     await student.login(STUDENT_ID);
     await outsider.login(OTHER_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
     await admin.login(ADMIN_ID);
 
     assert.equal((await anonymous.request('/api/review')).status, 401);
@@ -299,6 +430,7 @@ test('teacher supplement submission and moderated approval stay anonymous in rev
     const reviewer = client();
     await student.login(STUDENT_ID);
     await reviewer.login(REVIEWER_ID);
+    await reviewer.elevate();
     const submitted = await student.request('/api/teacher-submissions', {
       method: 'POST', body: { name: '测试教师甲', subject: '虚构学科', motto: '仅用于本地测试' }
     });
@@ -322,14 +454,16 @@ test('database failures return bounded errors without leaking internal messages'
     const unavailable = Object.assign(new Error('secret upstream address'), {
       name: 'CloudBasePgError', code: 'UPSTREAM_UNAVAILABLE', status: 503
     });
-    store.failNext('getDocument', 'users', unavailable);
-    const loginFailure = await browser.login(STUDENT_ID);
-    assert.equal(loginFailure.status, 503);
-    assert.equal(loginFailure.data.error, '数据库当前请求过多，请稍后重试');
-    assert.doesNotMatch(JSON.stringify(loginFailure.data), /secret upstream address/);
-    assert.match(loginFailure.data.diagnostic, /CloudBasePgError:UPSTREAM_UNAVAILABLE/);
-
     assert.equal((await browser.login(STUDENT_ID)).status, 200);
+    store.failNext('getDocument', 'users', unavailable);
+    const accessFailure = await browser.request('/api/auth/access', {
+      method: 'POST', body: { code: 'reviewer-fixture-code' }
+    });
+    assert.equal(accessFailure.status, 503);
+    assert.equal(accessFailure.data.error, '存储服务当前繁忙，请稍后重试');
+    assert.doesNotMatch(JSON.stringify(accessFailure.data), /secret upstream address/);
+    assert.match(accessFailure.data.diagnostic, /CloudBasePgError:UPSTREAM_UNAVAILABLE/);
+
     store.failNext('queryDocuments', 'drafts', new Error('private database detail'));
     const draftFailure = await browser.request('/api/drafts/mine');
     assert.equal(draftFailure.status, 500);

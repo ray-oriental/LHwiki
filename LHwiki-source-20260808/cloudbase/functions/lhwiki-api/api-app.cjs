@@ -16,21 +16,22 @@ const {
 } = require('./content.cjs');
 
 const COOKIE = 'campus_session';
-const VISIT_TRACKING_START = Date.parse('2026-08-10T00:00:00+08:00');
 const PUBLIC_CACHE_TTL = 6 * 60 * 60_000;
 const ARTICLE_CACHE_TTL = 6 * 60 * 60_000;
+const SESSION_ROLES = new Set(['student', 'reviewer', 'admin']);
 const encoder = new TextEncoder();
 
 function createApp({
   store,
   seed = { sections: [], articles: [] },
   publicSnapshot = { sections: [], articles: [], contributors: [], teacherAdditions: [] },
+  publicSnapshotStore = null,
+  buildPublicSnapshot = null,
   sessionSecret = '',
   adminBootstrapCode = '',
   reviewerAccessCode = '',
   region = 'ap-shanghai',
-  visitTrackingEnabled = false,
-  draftClientVersion = 3,
+  draftClientVersion = 4,
   emergencyMaintenance = true,
   maintenanceReviewDate = '2026-09-07',
   clock = () => Date.now(),
@@ -50,6 +51,8 @@ function createApp({
   let seedPromise;
   let publicCache = null;
   let publicCachePromise = null;
+  let publicSnapshotLoadedAt = null;
+  let publicSnapshotPromise = null;
   const articleCache = new Map();
   const mutationWindows = new Map();
 
@@ -69,35 +72,144 @@ function invalidatePublicCache() {
   articleCache.clear();
 }
 
-async function readPublicBootstrap() {
-  if (publicCache && clock() - publicCache.savedAt < PUBLIC_CACHE_TTL) return publicCache.value;
+function snapshotBootstrap(snapshot = publicSnapshot) {
+  const sections = snapshot.sections.slice();
+  const articles = snapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
+  const contributors = snapshot.contributors.slice();
+  const teacherAdditions = snapshot.teacherAdditions.slice();
+  sections.sort((a, b) => a.sort_order - b.sort_order);
+  sortByDate(articles, 'published_at');
+  return {
+    sections: sections.map(withoutId),
+    articles: articles.map(mapArticleSummary),
+    contributors: contributors.sort((a, b) => String(a.since).localeCompare(String(b.since))),
+    teacherAdditions
+  };
+}
+
+async function readStoredPublicSnapshot(force = false) {
+  if (!publicSnapshotStore?.load) return null;
+  if (!force && publicSnapshotLoadedAt !== null && clock() - publicSnapshotLoadedAt < PUBLIC_CACHE_TTL) return publicSnapshot;
+  if (!publicSnapshotPromise) publicSnapshotPromise = (async () => {
+    try {
+      publicSnapshot = await publicSnapshotStore.load();
+    } catch (err) {
+      logger.error?.(`public-snapshot-download-fallback:${safeDiagnostic(err)}`);
+    }
+    publicSnapshotLoadedAt = clock();
+    return publicSnapshot;
+  })().finally(() => { publicSnapshotPromise = null; });
+  return publicSnapshotPromise;
+}
+
+async function readPublicBootstrap(force = false) {
+  if (!force && publicCache && clock() - publicCache.savedAt < PUBLIC_CACHE_TTL) return publicCache.value;
   if (!publicCachePromise) publicCachePromise = (async () => {
-    const sections = publicSnapshot.sections.slice();
-    const articles = publicSnapshot.articles.map(article => ({ ...article, body_json: JSON.stringify(article.body) }));
-    const contributors = publicSnapshot.contributors.slice();
-    const teacherAdditions = publicSnapshot.teacherAdditions.slice();
-    sections.sort((a, b) => a.sort_order - b.sort_order);
-    sortByDate(articles, 'published_at');
-    const value = {
-      sections: sections.map(withoutId),
-      articles: articles.map(mapArticleSummary),
-      contributors: contributors.sort((a, b) => String(a.since).localeCompare(String(b.since))),
-      teacherAdditions
-    };
+    let value;
+    if (publicSnapshotStore?.load) {
+      value = snapshotBootstrap(await readStoredPublicSnapshot(force));
+      publicCache = { savedAt: clock(), value };
+      return value;
+    }
+    try {
+      const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+        queryDocuments('sections', null, 100, 'slug,title,description,icon,sort_order'),
+        queryDocuments('articles', null, 2000, 'slug,section_slug,title,summary,content_type,subject,author_label,published_at,updated_at'),
+        queryDocuments('contributors', null, 2000, 'display_name,approved_at'),
+        queryDocuments('teacher_additions', null, 500, 'id,name,subject,motto,approved_at')
+      ]);
+      sections.sort((a, b) => a.sort_order - b.sort_order);
+      sortByDate(articles, 'published_at');
+      value = {
+        sections: sections.map(withoutId),
+        articles: articles.map(mapArticleSummary),
+        contributors: contributors.filter(row => row.approved_at).map(row => ({ displayName: row.display_name, since: row.approved_at })).sort((a, b) => String(a.since).localeCompare(String(b.since))),
+        teacherAdditions: teacherAdditions.filter(row => row.approved_at).map(mapTeacherAddition)
+      };
+    } catch (err) {
+      logger.error?.(`public-bootstrap-fallback:${safeDiagnostic(err)}`);
+      value = snapshotBootstrap();
+    }
     publicCache = { savedAt: clock(), value };
     return value;
   })().finally(() => { publicCachePromise = null; });
   return publicCachePromise;
 }
 
-async function readPublicArticle(slug) {
+async function readPublicArticle(slug, force = false) {
   const cached = articleCache.get(slug);
-  if (cached && clock() - cached.savedAt < ARTICLE_CACHE_TTL) return cached.value;
-  const article = publicSnapshot.articles.find(item => item.slug === slug);
-  const value = article ? { ...article, body_json: JSON.stringify(article.body) } : null;
+  if (!force && cached && clock() - cached.savedAt < ARTICLE_CACHE_TTL) return cached.value;
+  let value;
+  if (publicSnapshotStore?.load) {
+    const snapshot = await readStoredPublicSnapshot(force);
+    const article = snapshot.articles.find(item => item.slug === slug);
+    value = article ? { ...article, body_json: JSON.stringify(article.body) } : null;
+    articleCache.set(slug, { savedAt: clock(), value });
+    if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
+    return value;
+  }
+  try {
+    value = withoutId(await getDocument('articles', slug));
+  } catch (err) {
+    logger.error?.(`public-article-fallback:${safeDiagnostic(err)}`);
+    const article = publicSnapshot.articles.find(item => item.slug === slug);
+    value = article ? { ...article, body_json: JSON.stringify(article.body) } : null;
+  }
   articleCache.set(slug, { savedAt: clock(), value });
   if (articleCache.size > 100) articleCache.delete(articleCache.keys().next().value);
   return value;
+}
+
+async function syncPublicSnapshot(reason) {
+  if (!publicSnapshotStore?.save || typeof buildPublicSnapshot !== 'function') {
+    invalidatePublicCache();
+    return null;
+  }
+  try {
+    const publish = async () => {
+      const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+        queryDocuments('sections', null, 100),
+        queryDocuments('articles', null, 2000),
+        queryDocuments('contributors', null, 2000),
+        queryDocuments('teacher_additions', null, 500)
+      ]);
+      const nextSnapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+      await publicSnapshotStore.save(nextSnapshot, { revision: store.getRevision?.() });
+      publicSnapshot = nextSnapshot;
+      publicSnapshotLoadedAt = clock();
+      publicCache = { savedAt: clock(), value: snapshotBootstrap(nextSnapshot) };
+      publicCachePromise = null;
+      articleCache.clear();
+      store.clearInternalMetaInMemory?.('pendingPublicSnapshot');
+    };
+    if (typeof store.setInternalMeta === 'function' && typeof store.afterCommit === 'function') {
+      store.setInternalMeta('pendingPublicSnapshot', { reason, requestedAt: new Date(clock()).toISOString() });
+      store.afterCommit(publish);
+    } else {
+      await publish();
+    }
+    return true;
+  } catch (err) {
+    invalidatePublicCache();
+    logger.error?.(`public-snapshot-sync-failed:${reason}:${safeDiagnostic(err)}`);
+    return false;
+  }
+}
+
+async function reconcilePendingPublicSnapshot() {
+  if (!publicSnapshotStore?.save || typeof store.getInternalMeta !== 'function') return;
+  const pending = store.getInternalMeta('pendingPublicSnapshot');
+  if (!pending) return;
+  const [sections, articles, contributors, teacherAdditions] = await Promise.all([
+    queryDocuments('sections', null, 100), queryDocuments('articles', null, 2000),
+    queryDocuments('contributors', null, 2000), queryDocuments('teacher_additions', null, 500)
+  ]);
+  const snapshot = buildPublicSnapshot({ sections, articles, contributors, teacher_additions: teacherAdditions });
+  await publicSnapshotStore.save(snapshot, { revision: store.getRevision?.() });
+  publicSnapshot = snapshot;
+  publicSnapshotLoadedAt = clock();
+  store.setInternalMeta?.('pendingPublicSnapshot', undefined);
+  invalidatePublicCache();
 }
 
 async function ensureSeed() {
@@ -147,8 +259,8 @@ async function hmac(secret, value) {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, encoder.encode(value)));
 }
 
-async function makeSession(studentId, secret) {
-  const payload = b64url(JSON.stringify({ studentId, exp: clock() + 7 * 86400_000 }));
+async function makeSession(studentId, role, secret) {
+  const payload = b64url(JSON.stringify({ version: 3, studentId, role, exp: clock() + 7 * 86400_000 }));
   return `${payload}.${b64url(await hmac(secret, payload))}`;
 }
 
@@ -173,36 +285,27 @@ async function readSession(request) {
   if (difference !== 0) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!validLoginId(data.studentId) || data.exp < clock()) return null;
-    const stored = withoutId(await getDocument('users', data.studentId));
-    if (data.studentId !== ADMIN_LOGIN_ID) {
-      return stored ? { ...stored, __persistent: true } : {
-        student_id: data.studentId,
-        role: 'student',
-        role_locked: 0,
-        created_at: now(),
-        last_login_at: now()
-      };
-    }
+    if (![2, 3].includes(Number(data.version)) || !validLoginId(data.studentId) || data.exp < clock() || !SESSION_ROLES.has(data.role)) return null;
     const timestamp = now();
-    const protectedAdmin = {
-      ...stored,
-      student_id: ADMIN_LOGIN_ID,
-      role: 'admin',
+    return {
+      student_id: data.studentId,
+      role: data.studentId === ADMIN_LOGIN_ID ? 'admin' : data.role,
       role_locked: 0,
-      created_at: stored?.created_at || timestamp,
-      last_login_at: stored?.last_login_at || timestamp,
-      __persistent: true
+      created_at: timestamp,
+      last_login_at: timestamp
     };
-    if (!stored || stored.role !== 'admin' || stored.role_locked !== 0) {
-      const persistedAdmin = { ...protectedAdmin };
-      delete persistedAdmin.__persistent;
-      await setDocument('users', ADMIN_LOGIN_ID, persistedAdmin);
-    }
-    return protectedAdmin;
   } catch {
     return null;
   }
+}
+
+async function verifyPrivilegedSession(user) {
+  if (!user || user.role === 'student' || user.student_id === ADMIN_LOGIN_ID) return user;
+  const stored = withoutId(await getDocument('users', user.student_id));
+  if (!stored || stored.role_locked || !['reviewer', 'admin'].includes(stored.role)) {
+    return { ...user, role: 'student', role_locked: stored?.role_locked ? 1 : 0 };
+  }
+  return { ...stored, __persistent: true };
 }
 
 function sessionCookie(value, maxAge = 604800) {
@@ -401,8 +504,12 @@ async function validateDraftTarget(user, targetType, targetId, requestedDraftKey
 }
 
 async function requireUser(request, roles = []) {
-  const user = await readSession(request);
+  let user = await readSession(request);
   if (!user) return { response: error('请先登入', 401) };
+  // Signed student sessions stay database-free. Privileged claims are checked
+  // only when an explicit private operation reaches this guard, so revocation
+  // remains immediate without turning public page loads into PostgreSQL reads.
+  if (user.role !== 'student') user = await verifyPrivilegedSession(user);
   if (roles.length && !roles.includes(user.role)) return { response: error('没有所需权限', 403) };
   return { user };
 }
@@ -435,12 +542,6 @@ function enforceMutationRate(request, scope, limit, windowMs = 60_000) {
   return null;
 }
 
-async function readVisitCount() {
-  const stats = withoutId(await getDocument('site_stats', 'all'));
-  const total = Number(stats?.total);
-  return Number.isSafeInteger(total) && total >= 0 ? total : 0;
-}
-
 async function rememberNamedContributor(studentId, displayName, timestamp = now()) {
   if (!displayName || displayName === '匿名同学') return null;
   const existing = withoutId(await getDocument('contributors', studentId));
@@ -455,7 +556,7 @@ function normalizePath(rawUrl) {
   return pathname.startsWith('/api') ? pathname : `/api${pathname === '/' ? '' : pathname}`;
 }
 
-async function route(request) {
+async function routeInner(request) {
   const method = request.method.toUpperCase();
   const path = normalizePath(request.url);
   if (!['GET', 'HEAD'].includes(method) && !checkMutationOrigin(request)) return error('请求来源无效', 403);
@@ -472,32 +573,17 @@ async function route(request) {
   }
 
   if (method === 'GET' && path === '/api/visits') {
-    if (emergencyMaintenance) return result({ total: null, trackingStartedAt: '2026-08-10', paused: true, maintenance: true });
-    if (!visitTrackingEnabled) return result({ total: null, trackingStartedAt: '2026-08-10', paused: true });
-    return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10' });
+    return result({ total: null, trackingStartedAt: '2026-08-10', paused: true, maintenance: emergencyMaintenance });
   }
 
   if (method === 'POST' && path === '/api/visits') {
-    if (emergencyMaintenance) return result({ trackingStartedAt: '2026-08-10', counted: false, paused: true, maintenance: true });
-    if (!visitTrackingEnabled) return result({ trackingStartedAt: '2026-08-10', counted: false, paused: true });
-    const limited = enforceMutationRate(request, 'visit', 120)
-      || enforceMutationRate(request, 'visit-sustained', 600, 15 * 60_000);
-    if (limited) return limited;
-    if (clock() < VISIT_TRACKING_START) {
-      return result({ total: await readVisitCount(), trackingStartedAt: '2026-08-10', counted: false });
-    }
-    const data = await readJson(request);
-    const visitId = normalizeText(data?.visitId, 96);
-    const visitCount = Number(data?.count ?? 1);
-    if (!/^[A-Za-z0-9_-]{16,96}$/.test(visitId)) return error('访问标识无效');
-    if (!Number.isSafeInteger(visitCount) || visitCount < 1 || visitCount > 20) return error('访问次数无效');
-    await setDocument('site_visit_events', visitId, { visit_id: visitId, visit_count: visitCount, created_at: now() });
-    return result({ trackingStartedAt: '2026-08-10', counted: true });
+    return result({ trackingStartedAt: '2026-08-10', counted: false, paused: true, maintenance: emergencyMaintenance });
   }
 
   if (method === 'GET' && path === '/api/bootstrap') {
+    const force = new URL(request.url, 'http://localhost').searchParams.has('refresh');
     return result(
-      await readPublicBootstrap(),
+      await readPublicBootstrap(force),
       200,
       { 'cache-control': 'public, max-age=21600, stale-while-revalidate=604800' }
     );
@@ -505,7 +591,8 @@ async function route(request) {
 
   if (method === 'GET' && path.startsWith('/api/articles/')) {
     const slug = decodeURIComponent(path.slice('/api/articles/'.length));
-    const article = await readPublicArticle(slug);
+    const force = new URL(request.url, 'http://localhost').searchParams.has('refresh');
+    const article = await readPublicArticle(slug, force);
     return article
       ? result({ article: mapArticle(article) }, 200, { 'cache-control': 'public, max-age=21600, stale-while-revalidate=604800' })
       : error('没有找到这篇内容', 404);
@@ -550,17 +637,20 @@ async function route(request) {
     const data = await readJson(request);
     const studentId = normalizeText(data?.studentId, 32);
     if (!validLoginId(studentId)) return error('抱歉，仅限本校学生编辑', 403);
-    const existing = withoutId(await getDocument('users', studentId));
+    const existingSession = await readSession(request);
+    const retainedRole = existingSession?.student_id === studentId && ['reviewer', 'admin'].includes(existingSession.role)
+      ? existingSession.role
+      : 'student';
     const timestamp = now();
     const user = studentId === ADMIN_LOGIN_ID
-      ? { ...existing, student_id: studentId, role: 'admin', role_locked: 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp }
-      : { student_id: studentId, role: existing?.role || 'student', role_locked: existing?.role_locked || 0, created_at: existing?.created_at || timestamp, last_login_at: timestamp };
-    // Ordinary student sessions are stateless: a guessed-but-valid student ID must not
-    // amplify a login scan into a persistent database write. Privileged roles remain
-    // discoverable through their existing user row, while the protected administrator
-    // is still repaired and persisted on every login.
-    if (studentId === ADMIN_LOGIN_ID) await setDocument('users', studentId, user);
-    const session = await makeSession(studentId, sessionSecret);
+      ? { student_id: studentId, role: 'admin', role_locked: 0, created_at: timestamp, last_login_at: timestamp }
+      : { student_id: studentId, role: retainedRole, role_locked: 0, created_at: timestamp, last_login_at: timestamp };
+    // Login is intentionally stateless. A scanner or an ordinary student must
+    // never wake PostgreSQL merely so the small privileged-account set can be
+    // discovered. Reviewers regain a lost/expired role with the existing access
+    // code; an unexpired signed session keeps its display role, while every
+    // privileged operation still verifies the current database row.
+    const session = await makeSession(studentId, user.role, sessionSecret);
     return result({ user: publicUser(user) }, 200, { 'set-cookie': sessionCookie(session) });
   }
 
@@ -574,6 +664,8 @@ async function route(request) {
     const auth = await requireUser(request);
     if (auth.response) return auth.response;
     if (auth.user.student_id === ADMIN_LOGIN_ID) return result({ user: publicUser(auth.user) });
+    const stored = withoutId(await getDocument('users', auth.user.student_id));
+    if (stored) auth.user = { ...auth.user, ...stored, __persistent: true };
     const code = normalizeText((await readJson(request))?.code, 200);
     if (!code) return error('请输入权限口令');
     if (auth.user.role_locked) return error('该账号的自助提权已停用，请联系管理员', 403);
@@ -589,7 +681,25 @@ async function route(request) {
       last_login_at: timestamp
     };
     await setDocument('users', auth.user.student_id, updated);
-    return result({ user: publicUser(updated) });
+    const session = await makeSession(updated.student_id, updated.role, sessionSecret);
+    return result({ user: publicUser(updated) }, 200, { 'set-cookie': sessionCookie(session) });
+  }
+
+  if (method === 'GET' && path === '/api/mine') {
+    const auth = await requireUser(request);
+    if (auth.response) return auth.response;
+    const [draftRows, submissionRows, teacherRows] = await Promise.all([
+      queryDocuments('drafts', { student_id: auth.user.student_id }, 100),
+      queryDocuments('submissions', { student_id: auth.user.student_id }),
+      queryDocuments('teacher_submissions', { student_id: auth.user.student_id })
+    ]);
+    const drafts = sortByDate(draftRows, 'updated_at').map(mapDraft);
+    const submissions = sortByDate(submissionRows, 'created_at').map(row => {
+      const clean = withoutId(row);
+      return { ...clean, body: parseDocument(clean.body_json), body_json: undefined };
+    });
+    const teacherSubmissions = sortByDate(teacherRows, 'created_at').map(mapTeacherSubmission);
+    return result({ drafts, submissions, teacherSubmissions }, 200, { 'cache-control': 'private, no-store' });
   }
 
   if (method === 'GET' && path === '/api/drafts/mine') {
@@ -612,16 +722,20 @@ async function route(request) {
     const targetId = normalizeText(data?.targetId, 140) || null;
     const target = await validateDraftTarget(auth.user, targetType, targetId, normalizeText(data?.draftKey, 100));
     if (target.error) return error(target.error, target.status || 400);
+    const prepared = normalizeDraftSnapshot(data?.snapshot || {});
+    if (prepared.error) return error(prepared.error);
     const existing = (await queryDocuments('drafts', {
       student_id: auth.user.student_id,
       draft_key: target.draftKey
     }, 1))[0];
-    if (existing) return result({ draft: mapDraft(existing) });
+    if (existing) {
+      const unchanged = Object.entries(prepared.values).every(([key, value]) => existing[key] === value);
+      if (unchanged) return result({ draft: mapDraft(existing) });
+      return result({ error: '云端已有同一草稿的其他版本', conflict: mapDraft(existing) }, 409);
+    }
     if (containsAdvancedBlocks(target.sourceBody || []) && Number(data?.snapshot?.schemaVersion || 1) < DOCUMENT_SCHEMA_VERSION) {
       return result({ error: '此内容包含新版编辑块，请刷新页面后继续编辑', upgradeRequired: true }, 409);
     }
-    const prepared = normalizeDraftSnapshot(data?.snapshot || {});
-    if (prepared.error) return error(prepared.error);
     auth.user = await ensurePersistentUser(auth.user);
     const id = randomUUID();
     const timestamp = now();
@@ -641,16 +755,15 @@ async function route(request) {
     } catch (failure) {
       const raced = (await queryDocuments('drafts', { student_id: auth.user.student_id, draft_key: target.draftKey }, 1))[0];
       if (!raced) throw failure;
-      created = raced;
+      return result({ error: '草稿已在其他页面创建', conflict: mapDraft(raced) }, 409);
     }
     return result({ draft: mapDraft(created) }, 201);
   }
 
   const draftMatch = path.match(/^\/api\/drafts\/([a-zA-Z0-9_-]+)$/);
   if (draftMatch && ['PUT', 'DELETE'].includes(method)) {
-    // Six cloud revisions per hour is enough for the five-minute idle policy
-    // while immediately containing legacy 30-second autosave tabs. Local
-    // browser recovery remains available when this returns 429.
+    // Cloud revisions are manual-only. Keep a hard ceiling as a final guard
+    // against scripted clicking or a modified client; local recovery is unlimited.
     const limited = method === 'PUT'
       ? enforceMutationRate(request, 'draft-save', 6, 60 * 60_000)
       : enforceMutationRate(request, 'draft-delete', 30);
@@ -707,6 +820,7 @@ async function route(request) {
     const timestamp = now();
     let id = draft.target_id;
     let slug = null;
+    let publicSnapshotSynced = null;
     if (draft.target_type === 'new') {
       id = draft.id;
       const recent = await queryDocuments('submissions', { student_id: auth.user.student_id });
@@ -731,12 +845,12 @@ async function route(request) {
       if (!article) return error('没有找到这篇已发布内容', 404);
       slug = article.slug;
       await setDocument('articles', article.slug, { ...article, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: timestamp });
-      invalidatePublicCache();
     } else {
       return error('草稿目标无效');
     }
     await deleteDocuments('drafts', { id: draft.id, student_id: auth.user.student_id });
-    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending' });
+    if (draft.target_type === 'article') publicSnapshotSynced = await syncPublicSnapshot('draft-article-publish');
+    return result({ ok: true, id, slug, status: draft.target_type === 'article' ? 'published' : 'pending', ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   if (method === 'GET' && path === '/api/submissions/mine') {
@@ -879,7 +993,6 @@ async function route(request) {
           approved_at: timestamp
         });
       }
-      invalidatePublicCache();
     }
     const status = action === 'approve' ? 'approved' : 'rejected';
     await setDocument('teacher_submissions', submission.id, {
@@ -890,7 +1003,8 @@ async function route(request) {
       updated_at: timestamp,
       reviewed_at: timestamp
     });
-    return result({ ok: true, status });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('teacher-approval') : null;
+    return result({ ok: true, status, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const reviewMatch = path.match(/^\/api\/review\/([a-zA-Z0-9_-]+)$/);
@@ -921,8 +1035,8 @@ async function route(request) {
     const eventId = randomUUID();
     await setDocument('review_events', eventId, { id: eventId, submission_id: submission.id, reviewer_id: auth.user.student_id, action, note, created_at: now() });
     await setDocument('submissions', submission.id, { ...submission, status: statuses[action], review_note: note, updated_at: now() });
-    if (action === 'approve') invalidatePublicCache();
-    return result({ ok: true, status: statuses[action], slug });
+    const publicSnapshotSynced = action === 'approve' ? await syncPublicSnapshot('article-approval') : null;
+    return result({ ok: true, status: statuses[action], slug, ...(publicSnapshotSynced === null ? {} : { publicSnapshotSynced }) });
   }
 
   const adminArticleMatch = path.match(/^\/api\/admin\/articles\/(.+)$/);
@@ -936,16 +1050,16 @@ async function route(request) {
     if (!existing) return error('没有找到这篇已发布内容', 404);
     if (method === 'DELETE') {
       await deleteDocument('articles', slug);
-      invalidatePublicCache();
-      return result({ ok: true, slug });
+      const publicSnapshotSynced = await syncPublicSnapshot('admin-article-delete');
+      return result({ ok: true, slug, publicSnapshotSynced });
     }
     const prepared = await validateSubmission(await readJson(request));
     if (prepared.error) return error(prepared.error);
     const [section_slug, title, summary, body_json, content_type, subject, author_label] = prepared.values;
     const updated = { ...existing, slug, section_slug, title, summary, body_json, content_type, subject, author_label, updated_at: now() };
     await setDocument('articles', slug, updated);
-    invalidatePublicCache();
-    return result({ ok: true, article: mapArticle(updated) });
+    const publicSnapshotSynced = await syncPublicSnapshot('admin-article-update');
+    return result({ ok: true, article: mapArticle(updated), publicSnapshotSynced });
   }
 
   if (method === 'GET' && path === '/api/admin/users') {
@@ -973,6 +1087,32 @@ async function route(request) {
   }
 
   return error('API 路径不存在', 404);
+}
+
+// Business mutations are committed as one immutable workflow generation. The
+// Login/logout and visit endpoints are stateless or paused. Access-code role
+// elevation persists data and therefore must use the same atomic path.
+async function route(request) {
+  const method = String(request.method || 'GET').toUpperCase();
+  const path = normalizePath(request.url);
+  const exempt = path === '/api/visits' || path === '/api/auth/login' || path === '/api/auth/logout';
+  const mutation = !['GET', 'HEAD'].includes(method) && !exempt;
+  if (!mutation || typeof store.runInTransaction !== 'function') return routeInner(request);
+  if (!checkMutationOrigin(request)) return error('请求来源无效', 403);
+  const idempotencyKey = String(request.headers['idempotency-key'] || '').trim();
+  if (!idempotencyKey || idempotencyKey.length > 200) {
+    return result({ error: '请升级客户端后重试', upgradeRequired: true }, 409);
+  }
+  const body = await readJson(request);
+  const session = await readSession(request);
+  const actor = session?.student_id || 'anonymous';
+  if (typeof store.runIdempotent === 'function') {
+    return store.runInTransaction(async () => {
+      await reconcilePendingPublicSnapshot();
+      return store.runIdempotent({ actor, method, path, key: idempotencyKey, body }, () => routeInner(request));
+    });
+  }
+  return store.runInTransaction(async () => { await reconcilePendingPublicSnapshot(); return routeInner(request); });
 }
 
 async function validateSubmission(data) {
@@ -1011,8 +1151,9 @@ async function handler(request, response) {
     send(response, await route(request));
   } catch (err) {
     logger.error(err);
-    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : err?.status === 429 ? 429 : 500;
-    send(response, result({ error: status === 503 ? '数据库当前请求过多，请稍后重试' : '服务器暂时无法处理请求', diagnostic: safeDiagnostic(err) }, status));
+    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : [409, 429].includes(err?.status) ? err.status : 500;
+    const message = status === 503 ? '存储服务当前繁忙，请稍后重试' : status === 409 ? '内容已在别处更新，请重试' : '服务器暂时无法处理请求';
+    send(response, result({ error: message, ...(status === 409 ? { conflict: true } : {}), diagnostic: safeDiagnostic(err) }, status));
   }
 }
 

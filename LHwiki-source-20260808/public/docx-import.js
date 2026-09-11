@@ -83,7 +83,7 @@ export async function parseDocx(file) {
   if (!file || file.size > 12 * 1024 * 1024) throw new Error('DOCX 文件不能超过 12 MB');
   const xmlBytes = await unzipEntry(await file.arrayBuffer(), 'word/document.xml');
   const xml = new DOMParser().parseFromString(decoder.decode(xmlBytes), 'application/xml');
-  if (xml.querySelector('parsererror')) throw new Error('DOCX 正文 XML 无法解析');
+  if (descendants(xml, 'parsererror').length) throw new Error('DOCX 正文 XML 无法解析');
   const body = descendants(xml, 'body')[0], blocks = [], warnings = ['DOCX 中的图片、脚注、批注、修订和浮动文本框不会导入。'];
   if (descendants(xml, 'numPr').length) warnings.push('Word 自动编号与项目符号会统一按项目列表导入。');
   if (descendants(xml, 'tr').length > 30 || descendants(xml, 'tc').some(cell => children(cell.parentNode, 'tc').length > 10)) warnings.push('超过 30 行或 10 列的 Word 表格会按编辑器上限截断。');
