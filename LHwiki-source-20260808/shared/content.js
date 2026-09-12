@@ -2,11 +2,11 @@
 export const STUDENT_ID_PATTERN = /^20\d{7}$/;
 export const ADMIN_LOGIN_ID = 'ray_oriental';
 export const LEGACY_BLOCK_TYPES = new Set(['paragraph', 'heading', 'subheading', 'quote', 'bullet', 'number']);
-export const BLOCK_TYPES = new Set([...LEGACY_BLOCK_TYPES, 'minorheading', 'divider', 'formula', 'table', 'columns', 'toggle']);
-export const ADVANCED_BLOCK_TYPES = new Set(['minorheading', 'divider', 'formula', 'table', 'columns', 'toggle']);
+export const BLOCK_TYPES = new Set([...LEGACY_BLOCK_TYPES, 'minorheading', 'task', 'callout', 'code', 'divider', 'formula', 'table', 'columns', 'toggle']);
+export const ADVANCED_BLOCK_TYPES = new Set(['minorheading', 'task', 'callout', 'code', 'divider', 'formula', 'table', 'columns', 'toggle']);
 export const CONTENT_TYPES = new Set(['访谈', '评价', '经验', '指南', '说明']);
 export const BLOCK_ID_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
-export const DOCUMENT_SCHEMA_VERSION = 2;
+export const DOCUMENT_SCHEMA_VERSION = 3;
 
 const LIMITS = Object.freeze({ nodes: 400, depth: 2, text: 8000, formula: 2000, rows: 30, columns: 10, cell: 1000 });
 
@@ -37,9 +37,9 @@ function cleanText(value, max, allowEmpty) {
 function cleanBlock(block, state, depth, allowEmpty) {
   if (!block || !BLOCK_TYPES.has(block.type) || depth >= LIMITS.depth || ++state.nodes > LIMITS.nodes) return null;
   const base = { ...cleanId(block, state), type: block.type };
-  if (LEGACY_BLOCK_TYPES.has(block.type) || block.type === 'minorheading') {
+  if (LEGACY_BLOCK_TYPES.has(block.type) || ['minorheading', 'task', 'callout', 'code'].includes(block.type)) {
     const text = cleanText(block.text, LIMITS.text, allowEmpty);
-    return text === null || (!allowEmpty && !text) ? null : { ...base, text };
+    return text === null || (!allowEmpty && !text) ? null : { ...base, text, ...(block.type === 'task' ? { checked: Boolean(block.checked) } : {}), ...(block.type === 'code' ? { language: String(block.language || '').replace(/[^A-Za-z0-9_+#.-]/g, '').slice(0, 24) } : {}) };
   }
   if (block.type === 'divider') return base;
   if (block.type === 'formula') {

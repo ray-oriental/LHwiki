@@ -1,5 +1,15 @@
 export const CHANGELOG_ENTRIES = Object.freeze([
   {
+    version: 'v0.9.0',
+    title: '原生样式与多格式导入',
+    date: '2026-08-29',
+    items: [
+      '编辑器新增任务项、提示块、代码块、行内公式和常用行内样式，并统一收入“插入”命令列表。',
+      '新增 Markdown、DOCX、LaTeX 和纯文本的浏览器本地导入，应用前显示格式降级警告。',
+      '导入可追加或替换，支持撤销/重做；内容协议升级至 schema v3 并同步云端安全白名单。'
+    ]
+  },
+  {
     version: 'v0.8.10',
     title: '工作流存储降耗切换',
     date: '2026-09-09',

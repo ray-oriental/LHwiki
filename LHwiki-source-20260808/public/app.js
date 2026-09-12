@@ -1,9 +1,10 @@
 import { formatDate } from './date.js';
-import { BlockEditor, EDITOR_SCHEMA_VERSION, normalizeBlocks } from './editor.js?v=20260822-v084';
+import { BlockEditor, EDITOR_SCHEMA_VERSION, contentNodeCount, normalizeBlocks } from './editor.js?v=20260829-native-formats';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260909-v0810c';
-import { changelogPage } from './changelog.js?v=20260909-v0810a';
-import { blocksToMarkdown, codeFence, parseInlineMarkdown, parseMarkdown } from './markdown.js?v=20260815-v081';
+import { changelogPage } from './changelog.js?v=20260829-native-formats';
+import { blocksToMarkdown, codeFence, parseInlineMarkdown } from './markdown.js?v=20260829-native-formats';
+import { importDocument } from './document-import.js?v=20260829-native-formats';
 
 const MAINTENANCE_MODE = false;
 const MAINTENANCE_REVIEW_DATE = '2026年9月7日';
@@ -649,14 +650,14 @@ async function contributePage() {
           <label class="title-field"><span>标题</span><input name="title" maxlength="100" placeholder="给这段经历一个具体的标题" required></label>
           <label><span>一句话摘要</span><textarea name="summary" maxlength="240" placeholder="告诉读者背景、重点和适合谁阅读" required></textarea></label>
           <label><span>评价对象或访谈主题（选填）</span><input name="subject" maxlength="80" placeholder="例如：文学社 / 高三一轮复习"></label></div>
-          <div class="editor-chrome"><div class="editor-actions"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块">＋ <span>插入</span></button><button type="button" class="editor-insert" data-markdown-open>Markdown</button></div><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · Shift+Enter 换行</span></div>
+          <div class="editor-chrome"><div class="editor-actions"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块或导入文档" aria-haspopup="dialog" aria-controls="editor-command-palette" aria-expanded="false">＋ <span>插入</span></button></div><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · ⌘/Ctrl+Z 撤销</span></div>
           <div id="block-editor" class="block-editor" aria-label="文章正文"></div>
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
         </section>
         <aside class="writing-status"><div class="save-state" data-save-state="saved" aria-live="polite"><span class="save-dot"></span><strong data-save-message>本机自动保存已就绪</strong><small data-save-revision></small></div><dl class="writing-stats"><div><dt>正文字符</dt><dd data-character-count>0</dd></div><div><dt>内容块</dt><dd data-block-count>1</dd></div></dl><div class="conflict-panel" data-conflict-panel hidden><strong>发现另一个版本</strong><p>为了避免覆盖，请选择要保留的版本。</p><button type="button" class="button small" data-use-cloud>采用云端版本</button><button type="button" class="button small" data-keep-copy>保留为新草稿</button></div><button type="button" class="button" data-save-now>立即保存到云端</button><button type="button" class="button" data-preview>预览文章</button><button class="button primary" type="submit">${context.isArticleEdit ? '保存公开文章' : context.isReviewEdit ? '保存并返回审核' : '提交审核'}</button><div class="draft-danger"><button type="button" class="button danger-quiet" data-delete-current-draft>删除这份草稿</button><small>${context.localOnly ? '只清除这台设备上的本机草稿' : '清除本机与云端尚未提交的内容'}</small></div><p class="form-error" data-form-error></p></aside>
         <dialog class="preview-dialog" id="preview-dialog"><div class="preview-head"><strong>投稿预览</strong><button type="button" class="icon-button" data-close-preview aria-label="关闭预览">×</button></div><article class="prose" id="preview-prose"></article></dialog>
-        <dialog class="preview-dialog markdown-dialog" id="markdown-dialog"><div class="preview-head"><strong>Markdown 输入与输出</strong><button type="button" class="icon-button" data-markdown-close aria-label="关闭 Markdown 面板">×</button></div><p class="muted">支持标题、引用、列表、表格、公式、分隔线和安全的行内格式。分栏与折叠块会以 LHwiki 扩展代码块无损保留。</p><label>Markdown 正文<textarea class="markdown-source" data-markdown-source spellcheck="false"></textarea></label><div class="form-actions"><button type="button" class="button" data-markdown-export>从当前正文生成</button><button type="button" class="button" data-markdown-copy>复制</button><button type="button" class="button primary" data-markdown-import>导入并替换正文</button></div></dialog>
+        <dialog class="preview-dialog markdown-dialog import-dialog" id="document-dialog"><div class="preview-head"><strong>文档导入与导出</strong><button type="button" class="icon-button" data-document-close aria-label="关闭文档面板">×</button></div><p class="muted">所有内容都会先在浏览器内解析和预检，不会导入任意 HTML、脚本或媒体。</p><div class="import-controls"><label>格式<select data-document-format><option value="markdown">Markdown</option><option value="docx">Word DOCX</option><option value="latex">LaTeX</option><option value="text">纯文本</option></select></label><label>选择文件（可选）<input type="file" data-document-file accept=".md,.markdown,.docx,.tex,.latex,.txt,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label></div><label data-document-source-wrap>文档源文<textarea class="markdown-source" data-document-source spellcheck="false" placeholder="在此粘贴 Markdown、LaTeX 或纯文本"></textarea></label><div class="import-report" data-import-report role="status" aria-live="polite">尚未预检</div><div class="form-actions"><button type="button" class="button" data-document-analyze>预检内容</button><button type="button" class="button" data-document-export>生成 Markdown</button><button type="button" class="button" data-document-copy>复制源文</button><button type="button" class="button" data-document-append disabled>追加到正文</button><button type="button" class="button primary" data-document-replace disabled>替换正文</button></div></dialog>
       </form>`);
     bindEditorExperience(context, initial);
   } catch (err) {
@@ -744,28 +745,27 @@ function bindEditorExperience(context, initial) {
     syncByline();
     manager.update(collectSnapshot(form, editor));
   });
-  document.querySelector('[data-editor-insert]').addEventListener('click', () => editor.openCommandPalette(editor.element(editor.activeId)));
-  const markdownButton = document.querySelector('[data-markdown-open]');
-  const markdownDialog = document.querySelector('#markdown-dialog');
-  const markdownSource = markdownDialog.querySelector('[data-markdown-source]');
-  const exportMarkdown = () => { markdownSource.value = blocksToMarkdown(editor.getBlocks()); };
-  markdownButton.addEventListener('click', () => { exportMarkdown(); markdownDialog.showModal(); });
-  markdownDialog.querySelector('[data-markdown-close]').addEventListener('click', () => markdownDialog.close());
-  markdownDialog.querySelector('[data-markdown-export]').addEventListener('click', exportMarkdown);
-  markdownDialog.querySelector('[data-markdown-copy]').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(markdownSource.value); toast('Markdown 已复制'); }
-    catch { markdownSource.select(); toast('无法自动复制，请使用系统复制命令'); }
+  const insertButton = document.querySelector('[data-editor-insert]'); insertButton.addEventListener('click', () => editor.openCommandPalette(editor.element(editor.activeId)));
+  document.querySelector('#block-editor').addEventListener('commandpalettechange', event => insertButton.setAttribute('aria-expanded', String(event.detail.open)));
+  document.querySelector('#block-editor').addEventListener('editorlimit', event => toast(event.detail.message));
+  const documentDialog = document.querySelector('#document-dialog'), documentSource = document.querySelector('[data-document-source]'), documentFormat = document.querySelector('[data-document-format]'), documentFile = document.querySelector('[data-document-file]'), importReport = document.querySelector('[data-import-report]');
+  const replaceButton = document.querySelector('[data-document-replace]'), appendButton = document.querySelector('[data-document-append]'); let preparedImport = null;
+  const resetImport = () => { preparedImport = null; replaceButton.disabled = true; appendButton.disabled = true; importReport.textContent = '内容已变更，请重新预检。'; };
+  const openDocumentDialog = ({ exporting = false } = {}) => { documentFormat.value = 'markdown'; documentFile.value = ''; documentSource.value = exporting ? blocksToMarkdown(editor.getBlocks()) : ''; preparedImport = null; replaceButton.disabled = true; appendButton.disabled = true; importReport.textContent = exporting ? '已生成当前正文的 Markdown。' : '尚未预检'; documentDialog.showModal(); };
+  document.querySelector('#block-editor').addEventListener('editorutility', event => openDocumentDialog({ exporting: event.detail.action === 'export-markdown' }));
+  document.querySelector('[data-document-close]').addEventListener('click', () => documentDialog.close());
+  documentSource.addEventListener('input', resetImport); documentFormat.addEventListener('change', () => { resetImport(); documentFile.value = ''; document.querySelector('[data-document-source-wrap]').hidden = documentFormat.value === 'docx'; });
+  documentFile.addEventListener('change', async () => { const file = documentFile.files?.[0]; if (!file) return; if (file.size > 12 * 1024 * 1024) { documentFile.value = ''; importReport.textContent = '文件不能超过 12 MB。'; return; } const extension = file.name.split('.').pop()?.toLowerCase(); documentFormat.value = extension === 'docx' ? 'docx' : ['tex', 'latex'].includes(extension) ? 'latex' : extension === 'txt' ? 'text' : 'markdown'; document.querySelector('[data-document-source-wrap]').hidden = documentFormat.value === 'docx'; if (documentFormat.value !== 'docx') documentSource.value = await file.text(); resetImport(); });
+  document.querySelector('[data-document-analyze]').addEventListener('click', async () => {
+    importReport.textContent = '正在本地解析…'; replaceButton.disabled = true; appendButton.disabled = true;
+    try { preparedImport = await importDocument({ format: documentFormat.value, source: documentSource.value, file: documentFile.files?.[0] }); const warnings = preparedImport.warnings.length ? ` 注意：${preparedImport.warnings.join(' ')}` : ' 未发现明显的格式损失。'; importReport.textContent = `可导入 ${preparedImport.stats.blocks} 个内容块、${preparedImport.stats.characters} 个非空白字符。${warnings}`; replaceButton.disabled = false; appendButton.disabled = false; }
+    catch (error) { preparedImport = null; importReport.textContent = `预检失败：${error.message}`; }
   });
-  markdownDialog.querySelector('[data-markdown-import]').addEventListener('click', () => {
-    if (!confirm('导入会替换当前正文，并自动记录在本机。是否继续？')) return;
-    editor.setBlocks(parseMarkdown(markdownSource.value), { focus: true });
-    const importedStats = editor.stats();
-    document.querySelector('[data-character-count]').textContent = importedStats.characters;
-    document.querySelector('[data-block-count]').textContent = importedStats.blocks;
-    manager.update(collectSnapshot(form, editor));
-    markdownDialog.close();
-    toast('Markdown 已导入');
-  });
+  document.querySelector('[data-document-export]').addEventListener('click', () => { documentFormat.value = 'markdown'; documentSource.value = blocksToMarkdown(editor.getBlocks()); document.querySelector('[data-document-source-wrap]').hidden = false; resetImport(); importReport.textContent = '已生成当前正文的 Markdown。'; });
+  document.querySelector('[data-document-copy]').addEventListener('click', async () => { try { await navigator.clipboard.writeText(documentSource.value); toast('文档源文已复制'); } catch { documentSource.select(); toast('无法自动复制，请使用系统复制命令'); } });
+  const applyImport = mode => { if (!preparedImport) return; const blocks = mode === 'append' ? [...editor.getBlocks(), ...preparedImport.blocks] : preparedImport.blocks; if (contentNodeCount(blocks) > 400) { importReport.textContent = '无法追加：当前正文与导入内容合计超过 400 个内容节点，请改用替换或精简文档。'; return; } editor.setBlocks(blocks, { focus: true, remember: true }); const importedStats = editor.stats(); document.querySelector('[data-character-count]').textContent = importedStats.characters; document.querySelector('[data-block-count]').textContent = importedStats.blocks; manager.update(collectSnapshot(form, editor)); documentDialog.close(); toast(`文档已${mode === 'append' ? '追加' : '导入'}，可用 ⌘/Ctrl+Z 撤销`); };
+  appendButton.addEventListener('click', () => applyImport('append'));
+  replaceButton.addEventListener('click', () => applyImport('replace'));
   document.querySelector('[data-save-now]').addEventListener('click', () => {
     manager.update(collectSnapshot(form, editor));
     manager.persistLocal();
@@ -896,6 +896,8 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
       if (part.type === 'text') element.append(document.createTextNode(part.text));
       else if (part.type === 'link') {
         const link = document.createElement('a'); link.textContent = part.text; link.href = part.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; element.append(link);
+      } else if (part.type === 'formula') {
+        const formula = document.createElement('span'); formula.className = 'inline-formula'; renderMath(formula, part.text); formula.querySelector('math')?.setAttribute('display', 'inline'); element.append(formula);
       } else {
         const tag = part.type === 'strong' ? 'strong' : part.type === 'emphasis' ? 'em' : part.type === 'strike' ? 'del' : 'code';
         const child = document.createElement(tag); child.textContent = part.text; element.append(child);
@@ -910,6 +912,9 @@ function renderBlocks(container, blocks = [], { anchors = false } = {}) {
         if (!currentList || currentList.tagName !== tag) { currentList = document.createElement(tag); target.append(currentList); }
         const item = document.createElement('li'); appendInline(item, block.text); currentList.append(item); continue;
       }
+      if (block.type === 'task') { currentList = null; const item = document.createElement('label'); item.className = 'published-task'; const check = document.createElement('input'); check.type = 'checkbox'; check.checked = Boolean(block.checked); check.disabled = true; const text = document.createElement('span'); appendInline(text, block.text); item.append(check, text); target.append(item); continue; }
+      if (block.type === 'callout') { currentList = null; const note = document.createElement('aside'); note.className = 'published-callout'; note.setAttribute('role', 'note'); appendInline(note, block.text); target.append(note); continue; }
+      if (block.type === 'code') { currentList = null; const pre = document.createElement('pre'); const code = document.createElement('code'); if (block.language) code.dataset.language = block.language; code.textContent = block.text; pre.append(code); target.append(pre); continue; }
       currentList = null;
       if (block.type === 'divider') { target.append(document.createElement('hr')); continue; }
       if (block.type === 'formula') { const formula = document.createElement('div'); formula.className = 'published-formula'; renderMath(formula, block.text); target.append(formula); continue; }

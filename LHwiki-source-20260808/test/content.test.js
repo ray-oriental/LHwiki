@@ -60,3 +60,16 @@ test('tables enforce row, column and plain-text cell limits', () => {
   const clean = parseDraftDocument([{ type: 'table', rows: [['<b>text</b>']] }]);
   assert.equal(clean[0].rows[0][0], '<b>text</b>');
 });
+
+test('native task, callout and code blocks stay bounded and plain-text safe', () => {
+  const body = parseDraftDocument([
+    { type: 'task', checked: true, text: '已完成' },
+    { type: 'callout', text: '<script>仍是文字</script>' },
+    { type: 'code', language: 'js<script>', text: 'alert(1)' }
+  ]);
+  assert.deepEqual(body.map(block => block.type), ['task', 'callout', 'code']);
+  assert.equal(body[0].checked, true);
+  assert.equal(body[1].text, '<script>仍是文字</script>');
+  assert.equal(body[2].language, 'jsscript');
+  assert.equal(containsAdvancedBlocks(body), true);
+});

@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@xmldom/xmldom':
+        specifier: ^0.9.12
+        version: 0.9.12
       wrangler:
         specifier: 4.119.0
         version: 4.119.0
@@ -408,6 +411,10 @@ packages:
   '@speed-highlight/core@1.2.23':
     resolution: {integrity: sha512-iRoq6i6JDJP6Mt2A5JaPvzw0pgYHH6k92ij+yXiTrB7T2y9N789aWE3EHWj/5ztlJBokcCBja3iYLVdu5wgnkg==}
 
+  '@xmldom/xmldom@0.9.12':
+    resolution: {integrity: sha512-5AXjrcMClTryPe9LgZrygpB1lj7s0S9E0+W+AHaVKAVyHanafK86iPSvG5xHVSp/jC+VH1UXu0TAEmY279xH7A==}
+    engines: {node: '>=14.6'}
+
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
 
@@ -744,6 +751,8 @@ snapshots:
   '@sindresorhus/is@7.2.0': {}
 
   '@speed-highlight/core@1.2.23': {}
+
+  '@xmldom/xmldom@0.9.12': {}
 
   blake3-wasm@2.1.5: {}
 

@@ -1,13 +1,13 @@
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 
-const SIMPLE_TYPES = new Set(['paragraph', 'heading', 'subheading', 'minorheading', 'quote', 'bullet', 'number', 'formula']);
+const SIMPLE_TYPES = new Set(['paragraph', 'heading', 'subheading', 'minorheading', 'quote', 'bullet', 'number', 'task', 'callout', 'code', 'formula']);
 const BLOCK_TYPES = new Set([...SIMPLE_TYPES, 'divider', 'table', 'columns', 'toggle']);
 const TYPE_LABELS = Object.freeze({
   paragraph: '正文', heading: '大标题（H2）', subheading: '中标题（H3）', minorheading: '小标题（H4）',
-  quote: '引用', bullet: '项目列表', number: '编号列表', formula: '数学公式', table: '表格', columns: '分栏', toggle: '折叠标题', divider: '分隔线'
+  quote: '引用', bullet: '项目列表', number: '编号列表', task: '任务项', callout: '提示块', code: '代码块', formula: '数学公式', table: '表格', columns: '分栏', toggle: '折叠标题', divider: '分隔线'
 });
-const SHORTCUTS = Object.freeze({ '## ': 'heading', '### ': 'subheading', '#### ': 'minorheading', '> ': 'quote', '- ': 'bullet', '* ': 'bullet', '1. ': 'number' });
-export const EDITOR_SCHEMA_VERSION = 2;
+const SHORTCUTS = Object.freeze({ '## ': 'heading', '### ': 'subheading', '#### ': 'minorheading', '> ': 'quote', '- ': 'bullet', '* ': 'bullet', '1. ': 'number', '- [ ] ': 'task', '::: ': 'callout', '``` ': 'code' });
+export const EDITOR_SCHEMA_VERSION = 3;
 
 export const COMMANDS = Object.freeze([
   { id: 'paragraph', type: 'paragraph', category: '文字', label: '正文', description: '普通段落', aliases: ['正文', '段落', 'text', 'paragraph', 'p'] },
@@ -17,6 +17,15 @@ export const COMMANDS = Object.freeze([
   { id: 'quote', type: 'quote', category: '文字', label: '引用', description: '突出一段引文', aliases: ['引用', '引文', 'quote'] },
   { id: 'bullet', type: 'bullet', category: '文字', label: '项目列表', description: '无序列表', aliases: ['列表', '无序', 'bullet', 'list'] },
   { id: 'number', type: 'number', category: '文字', label: '编号列表', description: '有序列表', aliases: ['编号', '有序', 'number', 'ordered'] },
+  { id: 'task', type: 'task', category: '文字', label: '任务项', description: '可勾选的待办条目', aliases: ['任务', '待办', 'todo', 'task', 'checkbox'] },
+  { id: 'callout', type: 'callout', category: '文字', label: '提示块', description: '突出提示或注意事项', aliases: ['提示', '注意', 'callout', 'note', 'tip'] },
+  { id: 'code', type: 'code', category: '文字', label: '代码块', description: '保留换行的等宽文本', aliases: ['代码', 'code', 'pre', 'fence'] },
+  { id: 'strong', action: 'inline-strong', category: '行内样式', label: '粗体', description: '加粗选中文字', aliases: ['粗体', 'bold', 'strong'] },
+  { id: 'emphasis', action: 'inline-emphasis', category: '行内样式', label: '斜体', description: '倾斜选中文字', aliases: ['斜体', 'italic', 'emphasis'] },
+  { id: 'strike', action: 'inline-strike', category: '行内样式', label: '删除线', description: '标记已删除内容', aliases: ['删除线', 'strike', 'delete'] },
+  { id: 'inline-code', action: 'inline-code', category: '行内样式', label: '行内代码', description: '等宽显示选中文字', aliases: ['行内代码', 'inline code'] },
+  { id: 'link', action: 'inline-link', category: '行内样式', label: '链接', description: '添加 HTTPS 链接模板', aliases: ['链接', 'link', 'url'] },
+  { id: 'inline-formula', action: 'inline-formula', category: '行内样式', label: '行内公式', description: '以数学标记嵌入段落', aliases: ['行内公式', 'inline math'] },
   { id: 'table', type: 'table', category: '结构', label: '表格', description: '可增删行列的纯文本表格', aliases: ['表格', 'table', 'grid'] },
   { id: 'columns2', type: 'columns', count: 2, category: '结构', label: '两栏', description: '窄屏自动上下排列', aliases: ['两栏', '双栏', '2 columns', 'columns'] },
   { id: 'columns3', type: 'columns', count: 3, category: '结构', label: '三栏', description: '窄屏自动上下排列', aliases: ['三栏', '3 columns', 'columns'] },
@@ -24,6 +33,8 @@ export const COMMANDS = Object.freeze([
   { id: 'toggle3', type: 'toggle', level: 3, category: '结构', label: '折叠中标题', description: '标题和可折叠子内容', aliases: ['折叠', '中标题', 'toggle h3'] },
   { id: 'divider', type: 'divider', category: '结构', label: '分隔线', description: '分隔上下内容', aliases: ['分隔线', 'divider', 'line', 'hr'] },
   { id: 'formula', type: 'formula', category: '数学', label: '数学公式', description: 'LaTeX 输入，实时显示', aliases: ['公式', '数学', 'latex', 'math', 'equation'] },
+  { id: 'import-document', action: 'import-document', category: '导入与导出', label: '导入文档', description: 'Markdown、DOCX、TXT 或 LaTeX', aliases: ['导入', 'markdown', 'md', 'docx', 'word', 'latex', 'tex'] },
+  { id: 'export-markdown', action: 'export-markdown', category: '导入与导出', label: '导出 Markdown', description: '生成可复制的 Markdown', aliases: ['导出', 'export', 'markdown', 'md'] },
   { id: 'duplicate', action: 'duplicate', category: '块操作', label: '复制当前块', description: '在下方创建副本', aliases: ['复制', 'duplicate', 'copy'] },
   { id: 'move-up', action: 'move-up', category: '块操作', label: '上移当前块', description: '向上移动一格', aliases: ['上移', 'move up'] },
   { id: 'move-down', action: 'move-down', category: '块操作', label: '下移当前块', description: '向下移动一格', aliases: ['下移', 'move down'] },
@@ -47,7 +58,7 @@ function paragraph(value = '') { return { id: blockId(), type: 'paragraph', text
 function normalizeBlock(block, depth = 0) {
   if (!block || !BLOCK_TYPES.has(block.type) || depth > 1) return null;
   const base = { id: id(block.id), type: block.type };
-  if (SIMPLE_TYPES.has(block.type)) return { ...base, text: text(block.text, block.type === 'formula' ? 2000 : 8000) };
+  if (SIMPLE_TYPES.has(block.type)) return { ...base, text: text(block.text, block.type === 'formula' ? 2000 : 8000), ...(block.type === 'task' ? { checked: Boolean(block.checked) } : {}), ...(block.type === 'code' ? { language: String(block.language || '').replace(/[^A-Za-z0-9_+#.-]/g, '').slice(0, 24) } : {}) };
   if (block.type === 'divider') return base;
   if (block.type === 'table') {
     const source = Array.isArray(block.rows) ? block.rows.slice(0, 30) : [];
@@ -68,7 +79,10 @@ function normalizeBlock(block, depth = 0) {
 
 export function normalizeBlocks(blocks = []) {
   const clean = Array.isArray(blocks) ? blocks.slice(0, 400).map(block => normalizeBlock(block)).filter(Boolean) : [];
-  const normalized = clean.length ? clean : [paragraph()];
+  const cost = block => 1 + (block.type === 'table' ? block.rows.reduce((sum, row) => sum + row.length, 0) : block.type === 'columns' ? block.columns.reduce((sum, column) => sum + column.reduce((total, child) => total + cost(child), 0), 0) : block.type === 'toggle' ? block.children.reduce((sum, child) => sum + cost(child), 0) : 0);
+  let used = 0, truncated = Array.isArray(blocks) && blocks.length > 400; const bounded = [];
+  for (const block of clean) { const nodes = cost(block); if (used + nodes > 400) { truncated = true; continue; } bounded.push(block); used += nodes; }
+  const normalized = bounded.length ? bounded : [paragraph()];
   const seen = new Set();
   const visit = block => {
     if (seen.has(block.id)) block.id = blockId();
@@ -77,6 +91,7 @@ export function normalizeBlocks(blocks = []) {
     if (block.type === 'toggle') block.children.forEach(visit);
   };
   normalized.forEach(visit);
+  Object.defineProperty(normalized, 'truncated', { value: truncated, enumerable: false });
   return normalized;
 }
 
@@ -93,9 +108,11 @@ export function cloneBlockTree(block) {
 
 export function splitBlock(block, offset) {
   const safeOffset = Math.max(0, Math.min(Number(offset) || 0, block.text.length));
-  return [{ ...block, text: block.text.slice(0, safeOffset) }, { id: blockId(), type: ['heading', 'subheading', 'minorheading'].includes(block.type) ? 'paragraph' : block.type, text: block.text.slice(safeOffset) }];
+  const nextType = ['heading', 'subheading', 'minorheading'].includes(block.type) ? 'paragraph' : block.type;
+  return [{ ...block, text: block.text.slice(0, safeOffset) }, { ...block, id: blockId(), type: nextType, text: block.text.slice(safeOffset), ...(nextType === 'paragraph' ? { language: undefined, checked: undefined } : {}) }];
 }
-export function mergeBlocks(first, second) { return { ...first, text: `${first.text || ''}${second.text || ''}` }; }
+export function mergeBlocks(first, second) { return { ...first, text: `${first.text || ''}${second.text || ''}`, ...(first.type === 'task' ? { checked: Boolean(first.checked && second.checked) } : {}) }; }
+export function contentNodeCount(blocks = []) { const cost = block => 1 + (block.type === 'table' ? block.rows.reduce((sum, row) => sum + row.length, 0) : block.type === 'columns' ? block.columns.reduce((sum, column) => sum + column.reduce((total, child) => total + cost(child), 0), 0) : block.type === 'toggle' ? block.children.reduce((sum, child) => sum + cost(child), 0) : 0); return blocks.reduce((sum, block) => sum + cost(block), 0); }
 export function addTableRow(block) {
   if (block.type !== 'table' || block.rows.length >= 30) return false;
   block.rows.push(Array(block.rows[0].length).fill('')); return true;
@@ -141,13 +158,13 @@ export function setCaret(element, offset = 0, viewport = null) {
 export class BlockEditor {
   constructor(root, { blocks = [], onChange = () => {}, onSave = () => {} } = {}) {
     if (!root) throw new Error('BlockEditor root is required');
-    this.root = root; this.blocks = normalizeBlocks(blocks); this.onChange = onChange; this.onSave = onSave; this.activeId = this.blocks[0].id; this.composing = false; this.menuIndex = 0;
+    this.root = root; this.blocks = normalizeBlocks(blocks); this.onChange = onChange; this.onSave = onSave; this.activeId = this.blocks[0].id; this.composing = false; this.menuIndex = 0; this.undoStack = []; this.redoStack = []; this.inputHistoryPending = false;
     this.menu = this.createCommandPalette(); this.render(); this.bind();
   }
   createCommandPalette() {
-    const menu = document.createElement('div'); menu.className = 'command-palette'; menu.hidden = true; menu.setAttribute('role', 'dialog'); menu.setAttribute('aria-label', '插入或转换内容块');
+    const menu = document.createElement('div'); menu.id = 'editor-command-palette'; menu.className = 'command-palette'; menu.hidden = true; menu.setAttribute('role', 'dialog'); menu.setAttribute('aria-label', '插入或转换内容块');
     const search = document.createElement('input'); search.type = 'search'; search.className = 'command-search'; search.placeholder = '搜索：表格、公式、标题…'; search.setAttribute('aria-label', '搜索编辑命令');
-    const list = document.createElement('div'); list.className = 'command-list'; list.setAttribute('role', 'listbox'); menu.append(search, list); this.root.append(menu);
+    const list = document.createElement('div'); list.className = 'command-list'; list.id = 'editor-command-list'; list.setAttribute('role', 'listbox'); search.setAttribute('aria-controls', list.id); menu.append(search, list); this.root.append(menu);
     search.addEventListener('input', () => { this.menuIndex = 0; this.renderCommands(search.value); });
     search.addEventListener('keydown', event => this.handleMenuKeydown(event));
     menu.addEventListener('mousedown', event => { if (event.target.closest('[data-command]')) event.preventDefault(); });
@@ -159,16 +176,18 @@ export class BlockEditor {
     this.commandList.replaceChildren(); let category = '';
     commands.forEach((command, index) => {
       if (command.category !== category) { category = command.category; const label = document.createElement('div'); label.className = 'command-category'; label.textContent = category; this.commandList.append(label); }
-      const button = document.createElement('button'); button.type = 'button'; button.dataset.command = command.id; button.setAttribute('role', 'option'); button.className = index === this.menuIndex ? 'active' : '';
+      const button = document.createElement('button'); button.type = 'button'; button.id = `editor-command-${command.id}`; button.dataset.command = command.id; button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(index === this.menuIndex)); button.className = index === this.menuIndex ? 'active' : '';
       const strong = document.createElement('strong'); strong.textContent = command.label; const span = document.createElement('span'); span.textContent = command.description; button.append(strong, span); this.commandList.append(button);
     });
+    const active = commands[this.menuIndex]; if (active) this.commandSearch.setAttribute('aria-activedescendant', `editor-command-${active.id}`); else this.commandSearch.removeAttribute('aria-activedescendant');
   }
   openCommandPalette(anchor = null, query = '') {
     this.menu.hidden = false; this.menuIndex = 0; this.renderCommands(query); this.commandSearch.value = query;
+    this.root.dispatchEvent(new CustomEvent('commandpalettechange', { bubbles: true, detail: { open: true } }));
     const wrapper = anchor?.closest?.('.editor-block'); this.menu.style.top = `${(wrapper?.offsetTop ?? 0) + (wrapper?.offsetHeight ?? 0) + 4}px`;
     queueMicrotask(() => { try { this.commandSearch.focus({ preventScroll: true }); } catch { this.commandSearch.focus(); } });
   }
-  hideCommandPalette({ restoreFocus = false } = {}) { this.menu.hidden = true; if (restoreFocus) setCaret(this.element(this.activeId), this.currentBlock()?.text?.length || 0); }
+  hideCommandPalette({ restoreFocus = false } = {}) { this.menu.hidden = true; this.root.dispatchEvent(new CustomEvent('commandpalettechange', { bubbles: true, detail: { open: false } })); if (restoreFocus) setCaret(this.element(this.activeId), this.currentBlock()?.text?.length || 0); }
   handleMenuKeydown(event) {
     if (event.key === 'Escape') { event.preventDefault(); this.hideCommandPalette({ restoreFocus: true }); return; }
     if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
@@ -179,8 +198,10 @@ export class BlockEditor {
   }
   bind() {
     this.root.addEventListener('focusin', event => { const element = event.target.closest('[data-block-id]'); if (element) { this.activeId = element.dataset.blockId; this.emitSelection(); } });
+    this.root.addEventListener('focusout', event => { const input = event.target.closest('.block-input'); if (input) this.captureInlineSelection(input); });
     this.root.addEventListener('compositionstart', () => { this.composing = true; });
     this.root.addEventListener('compositionend', () => { this.composing = false; });
+    this.root.addEventListener('beforeinput', event => { if (!this.composing && !['historyUndo', 'historyRedo'].includes(event.inputType) && !this.inputHistoryPending) { this.remember(); this.inputHistoryPending = true; queueMicrotask(() => { this.inputHistoryPending = false; }); } });
     this.root.addEventListener('input', event => this.handleInput(event));
     this.root.addEventListener('keydown', event => this.handleKeydown(event));
     this.root.addEventListener('paste', event => this.handlePaste(event));
@@ -198,8 +219,8 @@ export class BlockEditor {
   currentIndex() { return this.location(this.activeId)?.index ?? 0; }
   currentBlock() { return this.location(this.activeId)?.block || this.blocks[0]; }
   getBlocks() { return JSON.parse(JSON.stringify(this.blocks)); }
-  setBlocks(blocks, { focus = false } = {}) { this.blocks = normalizeBlocks(blocks); this.activeId = this.blocks[0].id; this.render(); if (focus) setCaret(this.element(this.activeId), 0); this.emitSelection(); }
-  setCurrentType(type) { if (!SIMPLE_TYPES.has(type)) return; const location = this.location(this.activeId); if (!location || !('text' in location.block)) return; const offset = caretOffset(this.element(this.activeId)); location.block.type = type; this.replaceBlockDom(location.block); setCaret(this.element(this.activeId), offset); this.changed(); this.emitSelection(); }
+  setBlocks(blocks, { focus = false, remember = false } = {}) { if (remember) this.remember(); this.blocks = normalizeBlocks(blocks); this.activeId = this.blocks[0].id; this.render(); if (focus) setCaret(this.element(this.activeId), 0); this.emitSelection(); }
+  setCurrentType(type) { if (!SIMPLE_TYPES.has(type)) return; const location = this.location(this.activeId); if (!location || !('text' in location.block)) return; this.remember(); const offset = caretOffset(this.element(this.activeId)); location.block.type = type; if (type === 'task') location.block.checked = false; else delete location.block.checked; this.replaceBlockDom(location.block); setCaret(this.element(this.activeId), offset); this.changed(); this.emitSelection(); }
   render() { const fragment = document.createDocumentFragment(); this.blocks.forEach(block => fragment.append(this.renderBlock(block))); this.root.querySelectorAll(':scope > .editor-block').forEach(element => element.remove()); this.root.insertBefore(fragment, this.menu); }
   replaceBlockDom(block) { const old = this.root.querySelector(`.editor-block[data-block-id="${block.id}"]`); old?.replaceWith(this.renderBlock(block, old.classList.contains('nested-block'))); }
   insertSplitBlock(input, first, second) {
@@ -214,7 +235,8 @@ export class BlockEditor {
     const wrapper = document.createElement('div'); wrapper.className = `editor-block type-${block.type}${nested ? ' nested-block' : ''}`; wrapper.dataset.blockId = block.id; wrapper.dataset.blockType = block.type;
     const marker = document.createElement('button'); marker.type = 'button'; marker.className = 'block-picker'; marker.dataset.blockMenu = block.id; marker.setAttribute('aria-label', `打开${TYPE_LABELS[block.type]}菜单`); marker.textContent = '+'; wrapper.append(marker);
     if (SIMPLE_TYPES.has(block.type)) {
-      const input = document.createElement('div'); input.className = 'block-input'; input.contentEditable = 'true'; input.spellcheck = block.type !== 'formula'; input.dataset.blockId = block.id; input.dataset.placeholder = block.type === 'formula' ? '输入 LaTeX，例如 \\frac{a}{b}' : ['heading', 'subheading', 'minorheading'].includes(block.type) ? '写下标题' : '继续写…'; input.setAttribute('role', 'textbox'); input.setAttribute('aria-multiline', 'true'); input.textContent = block.text; wrapper.append(input);
+      if (block.type === 'task') { const check = document.createElement('input'); check.type = 'checkbox'; check.className = 'task-check'; check.checked = Boolean(block.checked); check.dataset.taskId = block.id; check.setAttribute('aria-label', '标记任务完成状态'); wrapper.append(check); }
+      const input = document.createElement('div'); input.className = 'block-input'; input.contentEditable = 'true'; input.spellcheck = !['formula', 'code'].includes(block.type); input.dataset.blockId = block.id; input.dataset.placeholder = block.type === 'formula' ? '输入 LaTeX，例如 \\frac{a}{b}' : block.type === 'code' ? '输入代码或预格式文本' : ['heading', 'subheading', 'minorheading'].includes(block.type) ? '写下标题' : '继续写…'; input.setAttribute('role', 'textbox'); input.setAttribute('aria-label', `${TYPE_LABELS[block.type]}内容`); input.setAttribute('aria-multiline', 'true'); input.textContent = block.text; wrapper.append(input);
       if (block.type === 'formula') { const preview = document.createElement('div'); preview.className = 'formula-preview'; renderMath(preview, block.text); wrapper.append(preview); }
     } else if (block.type === 'divider') { const rule = document.createElement('hr'); rule.className = 'editor-divider'; wrapper.append(rule); }
     else if (block.type === 'table') wrapper.append(this.renderTable(block));
@@ -241,6 +263,10 @@ export class BlockEditor {
     if (cell) { const block = this.location(cell.dataset.tableId)?.block; if (block?.type === 'table') { block.rows[Number(cell.dataset.row)][Number(cell.dataset.column)] = text(cell.innerText, 1000); this.activeId = block.id; this.changed(); } return; }
     const input = event.target.closest('.block-input'); if (!input) return; const block = this.location(input.dataset.blockId)?.block; if (!block) return;
     block.text = text(input.innerText, block.type === 'formula' ? 2000 : 8000); this.activeId = block.id;
+    if (!this.composing && block.type === 'bullet') {
+      const task = block.text.match(/^\[([ xX])\]\s$/);
+      if (task) { block.type = 'task'; block.checked = task[1].toLowerCase() === 'x'; block.text = ''; this.replaceBlockDom(block); setCaret(this.element(block.id), 0); this.emitSelection(); this.changed(); return; }
+    }
     if (block.type === 'formula') renderMath(input.closest('.editor-block').querySelector('.formula-preview'), block.text);
     if (!this.composing) {
       const type = SHORTCUTS[block.text]; if (type) { block.text = ''; block.type = type; this.replaceBlockDom(block); setCaret(this.element(block.id), 0); this.emitSelection(); }
@@ -250,10 +276,13 @@ export class BlockEditor {
   }
   handleKeydown(event) {
     const cell = event.target.closest?.('[data-table-id]');
-    if (cell && event.key === 'Tab') { event.preventDefault(); const block = this.location(cell.dataset.tableId)?.block; if (!block) return; const target = tableTabTarget(block, Number(cell.dataset.row), Number(cell.dataset.column), event.shiftKey); if (target.added) this.replaceBlockDom(block); const next = this.root.querySelector(`[data-table-id="${block.id}"][data-row="${target.row}"][data-column="${target.column}"]`); try { next?.focus({ preventScroll: true }); } catch { next?.focus(); } this.changed(); return; }
+    if (cell && event.key === 'Tab') { event.preventDefault(); const block = this.location(cell.dataset.tableId)?.block; if (!block) return; const row = Number(cell.dataset.row), column = Number(cell.dataset.column), addsRow = !event.shiftKey && row === block.rows.length - 1 && column === block.rows[0].length - 1 && block.rows.length < 30; if (addsRow && contentNodeCount(this.blocks) + block.rows[0].length > 400) { this.limitReached(); return; } if (addsRow) this.remember(); const target = tableTabTarget(block, row, column, event.shiftKey); if (target.added) this.replaceBlockDom(block); const next = this.root.querySelector(`[data-table-id="${block.id}"][data-row="${target.row}"][data-column="${target.column}"]`); try { next?.focus({ preventScroll: true }); } catch { next?.focus(); } this.changed(); return; }
     const input = event.target.closest?.('.block-input'); if (!input) return; this.activeId = input.dataset.blockId;
     if (this.composing || event.isComposing || event.keyCode === 229) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); this.onSave(); return; }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); return; }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); this.redo(); return; }
+    if ((event.ctrlKey || event.metaKey) && ['b', 'i'].includes(event.key.toLowerCase())) { event.preventDefault(); this.applyInline(event.key.toLowerCase() === 'b' ? 'strong' : 'emphasis'); return; }
     if (event.key === 'Escape') { this.hideCommandPalette(); return; }
     const location = typeof this.location === 'function' ? this.location(this.activeId) : { block: this.blocks[this.currentIndex()], collection: this.blocks, index: this.currentIndex() };
     const block = location?.block; if (!block) return;
@@ -262,23 +291,25 @@ export class BlockEditor {
       return;
     }
     const offset = caretOffset(input);
-    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); const [first, second] = splitBlock(block, offset); location.collection.splice(location.index, 1, first, second); this.activeId = second.id; this.insertSplitBlock(input, first, second); this.changed(); return; }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (contentNodeCount(this.blocks) >= 400) { this.limitReached(); return; } this.remember?.(); const [first, second] = splitBlock(block, offset); location.collection.splice(location.index, 1, first, second); this.activeId = second.id; this.insertSplitBlock(input, first, second); this.changed(); return; }
     if (event.key === 'Backspace' && offset === 0) {
       if (!block.text && block.type !== 'paragraph') { event.preventDefault(); this.setCurrentType('paragraph'); return; }
-      if (location.index > 0 && 'text' in location.collection[location.index - 1]) { event.preventDefault(); const previous = location.collection[location.index - 1], length = previous.text.length; location.collection.splice(location.index - 1, 2, mergeBlocks(previous, block)); input.closest('.editor-block').remove(); this.replaceBlockDom(previous); this.activeId = previous.id; setCaret(this.element(previous.id), length); this.changed(); }
+      if (location.index > 0 && 'text' in location.collection[location.index - 1]) { event.preventDefault(); const previous = location.collection[location.index - 1]; if (previous.type !== block.type || (block.type === 'code' && previous.language !== block.language)) return; this.remember(); const length = previous.text.length; location.collection.splice(location.index - 1, 2, mergeBlocks(previous, block)); input.closest('.editor-block').remove(); this.replaceBlockDom(previous); this.activeId = previous.id; setCaret(this.element(previous.id), length); this.changed(); }
     }
     if (event.key === 'Delete' && offset === block.text.length && location.index < location.collection.length - 1 && 'text' in location.collection[location.index + 1]) {
-      event.preventDefault(); const next = location.collection[location.index + 1]; block.text += next.text; location.collection.splice(location.index + 1, 1); this.root.querySelector(`.editor-block[data-block-id="${next.id}"]`)?.remove(); input.textContent = block.text; setCaret(input, offset); this.changed();
+      event.preventDefault(); const next = location.collection[location.index + 1]; if (next.type !== block.type || (block.type === 'code' && next.language !== block.language)) return; this.remember(); const merged = mergeBlocks(block, next); Object.assign(block, merged); location.collection.splice(location.index + 1, 1); this.root.querySelector(`.editor-block[data-block-id="${next.id}"]`)?.remove(); input.textContent = block.text; setCaret(input, offset); this.changed();
     }
   }
   handlePaste(event) {
     const input = event.target.closest?.('.block-input'); if (!input || input.dataset.toggleTitle) return;
-    event.preventDefault(); const value = event.clipboardData?.getData('text/plain')?.replace(/\r\n?/g, '\n') || ''; const lines = value.split('\n'); const location = this.location(input.dataset.blockId); if (!location) return; const block = location.block, offset = caretOffset(input), before = block.text.slice(0, offset), after = block.text.slice(offset);
-    block.text = text(`${before}${lines.shift()}`); const inserted = lines.map((line, index) => paragraph(`${line}${index === lines.length - 1 ? after : ''}`)); location.collection.splice(location.index + 1, 0, ...inserted); this.replaceBlockDom(block); let previous = this.root.querySelector(`.editor-block[data-block-id="${block.id}"]`); inserted.forEach(child => { const dom = this.renderBlock(child, previous.classList.contains('nested-block')); previous.after(dom); previous = dom; }); const last = inserted.at(-1) || block; this.activeId = last.id; setCaret(this.element(last.id), inserted.length ? Math.max(0, last.text.length - after.length) : before.length + value.length); this.changed();
+    event.preventDefault(); const value = event.clipboardData?.getData('text/plain')?.replace(/\r\n?/g, '\n') || ''; const lines = value.split('\n'); const location = this.location(input.dataset.blockId); if (!location) return; this.remember(); const block = location.block, offset = caretOffset(input), before = block.text.slice(0, offset), after = block.text.slice(offset);
+    if (contentNodeCount(this.blocks) + lines.length - 1 > 400) { this.limitReached(); return; } block.text = text(`${before}${lines.shift()}`); const inserted = lines.map((line, index) => paragraph(`${line}${index === lines.length - 1 ? after : ''}`)); location.collection.splice(location.index + 1, 0, ...inserted); this.replaceBlockDom(block); let previous = this.root.querySelector(`.editor-block[data-block-id="${block.id}"]`); inserted.forEach(child => { const dom = this.renderBlock(child, previous.classList.contains('nested-block')); previous.after(dom); previous = dom; }); const last = inserted.at(-1) || block; this.activeId = last.id; setCaret(this.element(last.id), inserted.length ? Math.max(0, last.text.length - after.length) : before.length + value.length); this.changed();
   }
   handleClick(event) {
+    const task = event.target.closest('[data-task-id]');
+    if (task) { const block = this.location(task.dataset.taskId)?.block; if (block?.type === 'task') { this.remember(); block.checked = task.checked; this.activeId = block.id; this.changed(); } return; }
     const picker = event.target.closest('[data-block-menu]'); if (picker) { this.activeId = picker.dataset.blockMenu; this.openCommandPalette(picker); return; }
-    const action = event.target.closest('[data-table-action]'); if (!action) return; const block = this.location(action.dataset.tableId)?.block; if (!block?.rows?.length) return; const width = block.rows[0].length;
+    const action = event.target.closest('[data-table-action]'); if (!action) return; const block = this.location(action.dataset.tableId)?.block; if (!block?.rows?.length) return; const width = block.rows[0].length, addedNodes = action.dataset.tableAction === 'add-row' ? width : action.dataset.tableAction === 'add-column' ? block.rows.length : 0; if (addedNodes && contentNodeCount(this.blocks) + addedNodes > 400) { this.limitReached(); return; } this.remember();
     if (action.dataset.tableAction === 'add-row') addTableRow(block);
     if (action.dataset.tableAction === 'remove-row' && block.rows.length > 1) block.rows.pop();
     if (action.dataset.tableAction === 'add-column' && width < 10) block.rows.forEach(row => row.push(''));
@@ -289,10 +320,14 @@ export class BlockEditor {
     const command = COMMANDS.find(item => item.id === commandId), location = this.location(this.activeId); if (!command || !location) return;
     const old = location.block; if (old.text === '/' || old.text?.startsWith('/')) old.text = '';
     if (command.action) {
-      if (command.action === 'duplicate') { const copy = cloneBlockTree(old); location.collection.splice(location.index + 1, 0, copy); old && this.root.querySelector(`.editor-block[data-block-id="${old.id}"]`)?.after(this.renderBlock(copy)); this.activeId = copy.id; }
+      if (command.action.startsWith('inline-')) { this.hideCommandPalette(); this.applyInline(command.action.slice(7)); return; }
+      if (['import-document', 'export-markdown'].includes(command.action)) { this.hideCommandPalette(); this.root.dispatchEvent(new CustomEvent('editorutility', { bubbles: true, detail: { action: command.action } })); return; }
+      this.remember();
+      if (command.action === 'duplicate') { const copy = cloneBlockTree(old); if (contentNodeCount([...this.blocks, copy]) > 400) { this.limitReached(); this.hideCommandPalette(); return; } location.collection.splice(location.index + 1, 0, copy); old && this.root.querySelector(`.editor-block[data-block-id="${old.id}"]`)?.after(this.renderBlock(copy)); this.activeId = copy.id; }
       if (command.action === 'delete') { if (location.collection.length === 1) location.collection.splice(0, 1, paragraph()); else location.collection.splice(location.index, 1); this.render(); this.activeId = location.collection[Math.min(location.index, location.collection.length - 1)].id; }
       if (command.action.startsWith('move-')) { const target = location.index + (command.action === 'move-up' ? -1 : 1); if (target >= 0 && target < location.collection.length) { [location.collection[location.index], location.collection[target]] = [location.collection[target], location.collection[location.index]]; this.render(); } }
     } else {
+      this.remember();
       let replacement;
       if (SIMPLE_TYPES.has(command.type)) replacement = { id: old.id, type: command.type, text: old.text || '' };
       else if (command.type === 'table') replacement = { id: old.id, type: 'table', header: true, rows: [['标题 1', '标题 2'], [old.text || '', '']] };
@@ -300,16 +335,41 @@ export class BlockEditor {
       else if (command.type === 'toggle') replacement = { id: old.id, type: 'toggle', level: command.level, text: old.text || '', open: true, children: [paragraph()] };
       else if (old.text) {
         replacement = { id: blockId(), type: 'divider' };
+        if (contentNodeCount(this.blocks) >= 400) { this.limitReached(); this.hideCommandPalette(); return; }
         location.collection.splice(location.index + 1, 0, replacement);
         this.root.querySelector(`.editor-block[data-block-id="${old.id}"]`)?.after(this.renderBlock(replacement));
         this.activeId = replacement.id;
         this.hideCommandPalette(); this.changed(); this.emitSelection(); return;
       } else replacement = { id: old.id, type: 'divider' };
+      if (contentNodeCount(this.blocks) - contentNodeCount([old]) + contentNodeCount([replacement]) > 400) { this.limitReached(); this.hideCommandPalette(); return; }
       location.collection[location.index] = replacement; this.replaceBlockDom(replacement); this.activeId = replacement.id;
     }
     this.hideCommandPalette(); this.changed(); const focus = this.element(this.activeId) || this.root.querySelector(`.editor-block[data-block-id="${this.activeId}"] [contenteditable="true"]`); if (focus) setCaret(focus, focus.textContent?.length || 0); this.emitSelection();
   }
   changed() { this.onChange(this.getBlocks(), this.stats()); }
+  limitReached() { this.root.dispatchEvent(new CustomEvent('editorlimit', { bubbles: true, detail: { message: '正文已达到 400 个内容节点上限。' } })); }
+  captureInlineSelection(input) {
+    const selection = window.getSelection(); if (!selection?.rangeCount || !input.contains(selection.anchorNode) || !input.contains(selection.focusNode)) return;
+    const offsetFor = (node, offset) => { const range = document.createRange(); range.selectNodeContents(input); range.setEnd(node, offset); return range.toString().length; };
+    let start = offsetFor(selection.anchorNode, selection.anchorOffset), end = offsetFor(selection.focusNode, selection.focusOffset); if (start > end) [start, end] = [end, start]; this.savedInlineSelection = { id: input.dataset.blockId, start, end };
+  }
+  remember() { this.undoStack.push(this.getBlocks()); if (this.undoStack.length > 50) this.undoStack.shift(); this.redoStack = []; }
+  restoreHistory(snapshot, destination) { if (!snapshot) return; destination.push(this.getBlocks()); this.blocks = normalizeBlocks(snapshot); this.activeId = this.blocks[0].id; this.render(); setCaret(this.element(this.activeId), 0); this.changed(); this.emitSelection(); }
+  undo() { this.restoreHistory(this.undoStack.pop(), this.redoStack); }
+  redo() { this.restoreHistory(this.redoStack.pop(), this.undoStack); }
+  applyInline(style) {
+    const input = this.element(this.activeId), block = this.location(this.activeId)?.block;
+    if (!input || !block || !('text' in block) || ['formula', 'code'].includes(block.type)) return;
+    const selection = window.getSelection(); let start = block.text.length, end = start;
+    if (selection?.rangeCount && input.contains(selection.anchorNode) && input.contains(selection.focusNode)) {
+      const leading = document.createRange(); leading.selectNodeContents(input); leading.setEnd(selection.anchorNode, selection.anchorOffset); start = leading.toString().length;
+      const trailing = document.createRange(); trailing.selectNodeContents(input); trailing.setEnd(selection.focusNode, selection.focusOffset); end = trailing.toString().length;
+      if (start > end) [start, end] = [end, start];
+    } else if (this.savedInlineSelection?.id === block.id) ({ start, end } = this.savedInlineSelection);
+    const wrappers = { strong: ['**', '**', '粗体'], emphasis: ['*', '*', '斜体'], strike: ['~~', '~~', '删除文字'], code: ['`', '`', '代码'], formula: ['$', '$', 'x^2'], link: ['[', '](https://)', '链接文字'] };
+    const [open, close, placeholder] = wrappers[style] || wrappers.strong, selected = block.text.slice(start, end) || placeholder;
+    this.remember(); block.text = `${block.text.slice(0, start)}${open}${selected}${close}${block.text.slice(end)}`; this.savedInlineSelection = null; this.replaceBlockDom(block); this.activeId = block.id; setCaret(this.element(block.id), start + open.length + selected.length); this.changed();
+  }
   stats() {
     let characters = 0, blocks = 0; const visit = block => { blocks += 1; characters += (block.text || '').replace(/\s/g, '').length; if (block.type === 'table') block.rows.forEach(row => row.forEach(cell => { characters += cell.replace(/\s/g, '').length; })); if (block.type === 'columns') block.columns.forEach(column => column.forEach(visit)); if (block.type === 'toggle') block.children.forEach(visit); }; this.blocks.forEach(visit); return { characters, blocks };
   }

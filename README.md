@@ -3,13 +3,15 @@
 LHwiki 是面向潞河校园的轻量共建手册：公开阅读、校内学号投稿、人工审核发布。内容聚焦教师、课程、社团、校园生活与备考经验，强调具体、真诚和可追溯的分享。
 
 - 在线网站：[LHwiki · CloudBase 上海](https://lhwiki-d9g6r8vfzc7be1c0a-1465088461.ap-shanghai.app.tcloudbase.com/)
-- 当前发布版本：**v0.8.10**（生产环境仍以实际部署版本为准）
+- 当前发布版本：**v0.9.0**（生产环境仍以实际部署版本为准）
 - 技术栈：原生 JavaScript、Node.js 20 HTTP 云函数、CloudBase 静态托管、上海 COS 私有加密事件；原 PostgreSQL 只读保留
 - 源码目录：[`LHwiki-source-20260808/`](LHwiki-source-20260808/)
 - 完整版本记录：[`CHANGELOG.md`](CHANGELOG.md)
 
 ## 最近更新
 
+- 编辑器原生支持任务项、提示块、代码块、行内公式和常用行内样式。
+- “插入”命令列表统一提供 Markdown、DOCX、LaTeX 和纯文本的本地预检导入。
 - 生产函数由固定 13 文件白名单构建，旧数据库部署入口不会再把 PostgreSQL 维护代码或私有材料带回线上；未变化草稿提交时也会省去一次冗余云端写入。
 - 投稿、草稿、审核、权限和教师补充已迁入上海 COS 私有加密事件；正常网站请求不再访问 PostgreSQL，审核者或管理员操作仍实时复核权限。
 - 资源监控按 3000 点月度硬预算、2100 点运行目标、900 点应急余量和 PostgreSQL 五分钟计费桶判断，并优先区分开发更新与持续异常。
@@ -21,10 +23,13 @@ LHwiki 是面向潞河校园的轻量共建手册：公开阅读、校内学号�
 
 ## 本地测试
 
-```powershell
-cd LHwiki-source-20260808
-pnpm install
-pnpm test
+在仓库根目录执行：
+
+```shell
+npm run setup
+npm run dev
 ```
+
+浏览器打开 <http://localhost:8787/>。测试可运行 `npm test`。本地登录需要 `LHwiki-source-20260808/.dev.vars` 中的 `SESSION_SECRET`；该文件已被 Git 忽略，不得填入生产密钥。
 
 生产部署说明见 [`cloudbase/README.md`](LHwiki-source-20260808/cloudbase/README.md)。项目采用 MIT License。请勿将生产 API Key、学生学号、未公开投稿、审核记录或 `backup/` 数据上传到公开仓库。

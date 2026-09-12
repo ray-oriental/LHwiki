@@ -1,0 +1,9 @@
+{
+  "name": "lhwiki-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix LHwiki-source-20260808 run dev --",
+    "setup": "node LHwiki-source-20260808/scripts/setup-local.mjs",
+    "test": "npm --prefix LHwiki-source-20260808 test"
+  }
+}
