@@ -83,6 +83,8 @@ test('game entry is not a backend route and iframe does not request privileged c
 
 test('leaderboard stays host-owned, opt-in, and event-driven', () => {
   assert.match(app, /game-leaderboard/);
+  assert.match(app, /登榜条件/);
+  assert.match(app, /刷新本机个人最高分，且本局至少合成 1 个潞河/);
   assert.match(app, /MutationObserver/);
   assert.match(app, /src="\/games\/great-luhe\/\?theme=system"/);
   assert.match(app, /root\?\.children/);
@@ -96,5 +98,6 @@ test('leaderboard stays host-owned, opt-in, and event-driven', () => {
   assert.match(readFileSync(join(publicDir, 'index.html'), 'utf8'), /game-submit-dialog/);
   assert.match(styles, /great-luhe-frame[^}]*overflow: hidden/);
   assert.match(styles, /great-luhe-frame \{ order: -1; \}/);
+  assert.match(styles, /game-leaderboard-rule[^}]*background: var\(--paper-deep\)/);
   for (const source of sourceFiles) assert.doesNotMatch(source, /leaderboard|MutationObserver|\/api\//i);
 });

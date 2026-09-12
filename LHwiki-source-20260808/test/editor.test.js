@@ -320,8 +320,8 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(app, /published-toggle/);
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
-  assert.match(html, /20260912-great-luhe-leaderboard/);
-  assert.match(html, /app\.js\?v=20260912-great-luhe-leaderboard/);
+  assert.match(html, /20260912-great-luhe-rules/);
+  assert.match(html, /app\.js\?v=20260912-great-luhe-rules/);
   assert.match(app, /draft-manager\.js\?v=20260909-v0810c/);
   assert.match(app, /data-document-format/);
   assert.match(app, /data-document-analyze/);

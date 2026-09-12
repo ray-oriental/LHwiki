@@ -67,6 +67,8 @@ a { color: inherit; text-decoration: none; }
 .game-leaderboard-heading .eyebrow { margin-bottom: 5px; }
 .game-leaderboard-heading h3 { margin: 0; font: 700 22px var(--serif); }
 .game-leaderboard-status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.game-leaderboard-rule { display: flex; align-items: baseline; gap: 8px; margin: 0 0 12px; padding: 9px 10px; border-left: 3px solid var(--brick); background: var(--paper-deep); color: var(--muted); font-size: 11px; line-height: 1.6; }
+.game-leaderboard-rule strong { flex: 0 0 auto; color: var(--brick); font: 700 12px var(--serif); }
 .game-leaderboard-list { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
 .game-leaderboard-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .game-leaderboard-rank { color: var(--brick); font: 700 14px var(--serif); }
@@ -595,4 +597,4 @@ textarea { min-height: 92px; resize: vertical; }
 :root[data-theme-effective="dark"] .menu a:hover,
 :root[data-theme-effective="dark"] .menu button:hover { background: var(--paper); }
 @media (max-width: 760px) { .great-luhe-card { grid-template-columns: 1fr; } .great-luhe-frame { order: -1; } .great-luhe-copy { position: static; padding-top: 0; } }
-@media (max-width: 620px) { .theme-button { width: 44px; height: 44px; } .markdown-dialog { padding-right: 18px; padding-left: 18px; } .great-luhe-card-heading { align-items: start; } }
+@media (max-width: 620px) { .theme-button { width: 44px; height: 44px; } .markdown-dialog { padding-right: 18px; padding-left: 18px; } .great-luhe-card-heading { align-items: start; } .game-leaderboard-rule { display: block; } .game-leaderboard-rule strong { display: block; margin-bottom: 2px; } }

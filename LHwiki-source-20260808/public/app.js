@@ -276,6 +276,7 @@ function greatLuhePage() {
         <p class="great-luhe-note">游戏过程完全在你的设备上运行，最高分和声音偏好只保存在当前浏览器；仅在符合登榜条件且你确认后，外层页面才会上传这一次成绩。</p>
         <section class="game-leaderboard" aria-labelledby="game-leaderboard-title">
           <div class="game-leaderboard-heading"><div><span class="eyebrow">COMMUNITY SCOREBOARD</span><h3 id="game-leaderboard-title">潞河娱乐榜</h3></div><span class="game-leaderboard-status" data-game-leaderboard-status role="status" aria-live="polite">读取中…</span></div>
+          <p class="game-leaderboard-rule"><strong>登榜条件</strong><span>刷新本机个人最高分，且本局至少合成 1 个潞河；达成后由玩家自行确认是否上传。</span></p>
           <ol class="game-leaderboard-list" data-game-leaderboard aria-live="polite"><li class="game-leaderboard-empty">榜单加载中…</li></ol>
           <p class="game-leaderboard-note">只展示玩家主动上传的成绩，用于娱乐，不代表防作弊排名。</p>
         </section>
