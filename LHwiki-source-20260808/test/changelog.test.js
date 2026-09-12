@@ -27,4 +27,8 @@ test('发布版本在包、两份 Markdown 日志和站内日志之间保持一�
   assert.equal(CHANGELOG_ENTRIES[0].version, expected);
   assert.equal(rootLog.match(/^## (v\d+\.\d+\.\d+)/m)?.[1], expected);
   assert.equal(sourceLog.match(/^## (v\d+\.\d+\.\d+)/m)?.[1], expected);
+  for (const log of [rootLog, sourceLog]) {
+    const versions = [...log.matchAll(/^## (v\d+\.\d+\.\d+)\b/gm)].map(match => match[1]);
+    assert.equal(new Set(versions).size, versions.length, 'Markdown 更新日志中的版本标题必须唯一');
+  }
 });
