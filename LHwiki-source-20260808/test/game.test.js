@@ -91,6 +91,10 @@ test('leaderboard stays host-owned, opt-in, and event-driven', () => {
   assert.match(app, /getBoundingClientRect\(\)\.height/);
   assert.match(app, /data-lhwiki-embed-fix/);
   assert.match(app, /html,body\{margin:0;overflow:hidden\}/);
+  assert.match(app, /currentScore === 0 && lastScore > 0/);
+  assert.match(app, /lastScore > runStartBest && lastLuheCount >= 1/);
+  assert.match(app, /promptGameScoreUpload\(\{ score: lastScore, luheCount: lastLuheCount \}\)/);
+  assert.doesNotMatch(app, /currentScore > runStartBest && currentLuheCount >= 1/);
   assert.match(app, /score > runStartBest && luheCount >= 1/);
   assert.match(app, /method: 'POST'/);
   assert.match(app, /GAME_LEADERBOARD_TTL = 30 \* 60_000/);

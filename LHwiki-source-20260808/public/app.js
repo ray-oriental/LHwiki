@@ -320,7 +320,10 @@ async function loadGameLeaderboard() {
   const cached = readCache(localStorage, GAME_LEADERBOARD_CACHE_KEY, GAME_LEADERBOARD_TTL);
   if (cached?.scores) {
     renderGameLeaderboard(cached.scores, '本机缓存');
-    return cached.scores;
+    // An empty cache can become stale as soon as another player submits the
+    // first score. Keep populated boards cheap, but revalidate empty boards so
+    // a successful upload from another tab or function instance becomes visible.
+    if (cached.scores.length) return cached.scores;
   }
   try {
     const response = await api('/api/games/great-luhe/leaderboard');
@@ -389,6 +392,7 @@ function bindGameIntegration(frame) {
   let sizeObserver = null;
   let runStartBest = 0;
   let lastScore = 0;
+  let lastLuheCount = 0;
   let lastModal = null;
   let prompted = false;
   let queued = false;
@@ -412,12 +416,20 @@ function bindGameIntegration(frame) {
   const inspect = () => {
     queued = false;
     const currentScore = numberFrom(gameDocument?.querySelector('[data-role="score"]'));
+    const currentLuheCount = numberFrom(gameDocument?.querySelector('[data-role="luhe"]'));
     if (currentScore === 0 && lastScore > 0) {
-      runStartBest = readBest();
-      prompted = false;
+      // A reset to zero only happens after the player confirms "重开". Treat
+      // it as an explicit end of the previous run; never interrupt active play.
+      if (!prompted && lastScore > runStartBest && lastLuheCount >= 1) {
+        prompted = true;
+        promptGameScoreUpload({ score: lastScore, luheCount: lastLuheCount });
+      }
+      runStartBest = Math.max(readBest(), lastScore);
       lastModal = null;
     }
+    if (lastScore === 0 && currentScore > 0) prompted = false;
     lastScore = currentScore;
+    lastLuheCount = currentLuheCount;
     const modal = gameDocument?.querySelector('.gluhe-modal');
     if (!modal || modal === lastModal) return;
     lastModal = modal;
@@ -436,6 +448,7 @@ function bindGameIntegration(frame) {
   const startRun = () => {
     runStartBest = readBest();
     lastScore = numberFrom(gameDocument?.querySelector('[data-role="score"]'));
+    lastLuheCount = numberFrom(gameDocument?.querySelector('[data-role="luhe"]'));
     prompted = false;
     lastModal = null;
     scheduleInspect();

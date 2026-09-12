@@ -18,7 +18,9 @@ const {
 const COOKIE = 'campus_session';
 const PUBLIC_CACHE_TTL = 6 * 60 * 60_000;
 const ARTICLE_CACHE_TTL = 6 * 60 * 60_000;
-const GAME_LEADERBOARD_CACHE_TTL = 30 * 60_000;
+// Function instances do not share memory. A long per-instance cache can keep
+// serving a pre-submit empty board after another instance accepts a score.
+const GAME_LEADERBOARD_CACHE_TTL = 15_000;
 const GAME_LEADERBOARD_LIMIT = 10;
 const GAME_SCORE_ROWS_MAX = 100;
 const GAME_SCORE_MAX = 1_000_000_000;
