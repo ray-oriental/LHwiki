@@ -10,7 +10,7 @@
   <title>LHwiki · 潞河学生经验档案</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%237e352d%22/><path d=%22M24 23h13v43h27v12H24V23zm43 0h13v55H67V23z%22 fill=%22%23fffdf8%22/></svg>">
   <script src="/theme.js?v=20260822-v085"></script>
-  <link rel="stylesheet" href="/styles.css?v=20260829-native-formats">
+  <link rel="stylesheet" href="/styles.css?v=20260912-great-luhe-leaderboard">
 </head>
 <body>
   <div id="app"><div class="boot">正在打开 LHwiki…</div></div>
@@ -26,6 +26,17 @@
       <p class="form-error" data-login-error></p>
     </form>
   </dialog>
-  <script type="module" src="/app.js?v=20260829-native-formats"></script>
+  <dialog id="game-submit-dialog" class="dialog game-submit-dialog" aria-labelledby="game-submit-title">
+    <form method="dialog">
+      <button class="icon-button dialog-close" value="cancel" type="button" data-game-cancel aria-label="关闭">×</button>
+      <span class="eyebrow">OPTIONAL · ENTERTAINMENT ONLY</span>
+      <h2 id="game-submit-title">要把这次成绩放上娱乐榜吗？</h2>
+      <p class="muted">本局 <strong data-game-score>0</strong> 分，<strong data-game-luhe>潞河 × 1</strong>。成绩来自本机游戏，无法防止篡改，仅供娱乐。</p>
+      <label>榜单显示名<input name="displayName" autocomplete="nickname" maxlength="24" placeholder="例如：潞园同学" required></label>
+      <div class="dialog-actions"><button class="button" value="cancel" type="button" data-game-cancel>暂不上传</button><button class="button primary" type="submit" data-game-submit>上传成绩</button></div>
+      <p class="form-error" data-game-submit-error role="alert"></p>
+    </form>
+  </dialog>
+  <script type="module" src="/app.js?v=20260912-great-luhe-leaderboard"></script>
 </body>
 </html>

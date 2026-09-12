@@ -7,7 +7,10 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const PRIMARY_KEYS = Object.freeze({
   sections: 'slug', articles: 'slug', users: 'student_id', submissions: 'id',
   review_events: 'id', contributors: 'student_id', drafts: 'id',
-  teacher_submissions: 'id', teacher_additions: 'id', site_stats: 'key', site_visit_events: 'visit_id'
+  teacher_submissions: 'id', teacher_additions: 'id', site_stats: 'key', site_visit_events: 'visit_id',
+  // Entertainment-only game scores stay in the encrypted COS workflow.  They
+  // are deliberately not part of the PostgreSQL store or public snapshot.
+  game_scores: 'player_id', game_score_limits: 'bucket_id'
 });
 const CHUNK_SIZE = 64 * 1024;
 const DEFAULT_PREFIX = 'lhwiki-workflow-v1';

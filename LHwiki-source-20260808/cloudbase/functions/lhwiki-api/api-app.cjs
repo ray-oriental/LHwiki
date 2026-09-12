@@ -18,6 +18,15 @@ const {
 const COOKIE = 'campus_session';
 const PUBLIC_CACHE_TTL = 6 * 60 * 60_000;
 const ARTICLE_CACHE_TTL = 6 * 60 * 60_000;
+const GAME_LEADERBOARD_CACHE_TTL = 30 * 60_000;
+const GAME_LEADERBOARD_LIMIT = 10;
+const GAME_SCORE_ROWS_MAX = 100;
+const GAME_SCORE_MAX = 1_000_000_000;
+const GAME_LUHE_MAX = 1_000;
+const GAME_SCORE_BODY_MAX = 2 * 1024;
+const GAME_SCORE_GLOBAL_DAILY_LIMIT = 120;
+const GAME_SCORE_IP_DAILY_LIMIT = 8;
+const GAME_SCORE_PLAYER_DAILY_LIMIT = 3;
 const SESSION_ROLES = new Set(['student', 'reviewer', 'admin']);
 const encoder = new TextEncoder();
 
@@ -55,6 +64,7 @@ function createApp({
   let publicSnapshotPromise = null;
   const articleCache = new Map();
   const mutationWindows = new Map();
+  let gameLeaderboardCache = null;
 
 function now() {
   return new Date(clock()).toISOString();
@@ -70,6 +80,10 @@ function invalidatePublicCache() {
   publicCache = null;
   publicCachePromise = null;
   articleCache.clear();
+}
+
+function invalidateGameLeaderboardCache() {
+  gameLeaderboardCache = null;
 }
 
 function snapshotBootstrap(snapshot = publicSnapshot) {
@@ -330,19 +344,24 @@ function checkMutationOrigin(request) {
 
 const requestBodies = new WeakMap();
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 256 * 1024) {
   if (requestBodies.has(request)) return requestBodies.get(request);
-  const pending = readJsonOnce(request);
+  const pending = readJsonOnce(request, maxBytes);
   requestBodies.set(request, pending);
   return pending;
 }
 
-async function readJsonOnce(request) {
+async function readJsonOnce(request, maxBytes) {
   const chunks = [];
   let length = 0;
   for await (const chunk of request) {
     length += chunk.length;
-    if (length > 256 * 1024) throw new Error('请求内容过大');
+    if (length > maxBytes) {
+      const tooLarge = new Error('请求内容过大');
+      tooLarge.code = 'PAYLOAD_TOO_LARGE';
+      tooLarge.status = 413;
+      throw tooLarge;
+    }
     chunks.push(chunk);
   }
   if (!chunks.length) return null;
@@ -524,9 +543,9 @@ function clientAddress(request) {
     .split(',')[0].trim().slice(0, 80);
 }
 
-function enforceMutationRate(request, scope, limit, windowMs = 60_000) {
+function enforceMutationRate(request, scope, limit, windowMs = 60_000, identity = '') {
   const timestamp = clock();
-  const key = `${scope}:${clientAddress(request)}`;
+  const key = `${scope}:${identity || clientAddress(request)}`;
   const recent = (mutationWindows.get(key) || []).filter(value => timestamp - value < windowMs);
   if (recent.length >= limit) return error('操作过于频繁，请稍后再试', 429);
   recent.push(timestamp);
@@ -540,6 +559,122 @@ function enforceMutationRate(request, scope, limit, windowMs = 60_000) {
     }
   }
   return null;
+}
+
+function mapGameScore(row) {
+  return {
+    name: row.display_name,
+    score: Number(row.score),
+    luheCount: Number(row.luhe_count),
+    achievedAt: row.achieved_at
+  };
+}
+
+async function readGameLeaderboard() {
+  if (gameLeaderboardCache && clock() - gameLeaderboardCache.savedAt < GAME_LEADERBOARD_CACHE_TTL) {
+    return gameLeaderboardCache.value;
+  }
+  const rows = (await queryDocuments('game_scores', null, GAME_SCORE_ROWS_MAX + 1))
+    .filter(row => Number.isSafeInteger(Number(row.score))
+      && Number(row.score) > 0
+      && Number.isSafeInteger(Number(row.luhe_count))
+      && Number(row.luhe_count) >= 1
+      && typeof row.display_name === 'string');
+  rows.sort((a, b) => Number(b.score) - Number(a.score)
+    || String(a.achieved_at).localeCompare(String(b.achieved_at))
+    || String(a.player_id).localeCompare(String(b.player_id)));
+  const value = rows.slice(0, GAME_LEADERBOARD_LIMIT).map(mapGameScore);
+  gameLeaderboardCache = { savedAt: clock(), value };
+  return value;
+}
+
+function validateGameScore(data) {
+  const playerId = normalizeText(data?.playerId, 80);
+  const displayName = normalizeText(data?.displayName, 24).replace(/\s+/g, ' ');
+  const score = Number(data?.score);
+  const luheCount = Number(data?.luheCount);
+  if (!/^[A-Za-z0-9_-]{16,80}$/.test(playerId)) return { error: '设备标识无效' };
+  if (!displayName || !/^[\p{L}\p{N} _.·-]{1,24}$/u.test(displayName)) return { error: '显示名称只能包含文字、数字、空格和常用分隔符' };
+  if (!Number.isSafeInteger(score) || score < 1 || score > GAME_SCORE_MAX) return { error: '成绩范围无效' };
+  if (!Number.isSafeInteger(luheCount) || luheCount < 1 || luheCount > GAME_LUHE_MAX) return { error: '潞河数量无效' };
+  return { values: { playerId, displayName, score, luheCount } };
+}
+
+async function enforceDurableGameRate(request) {
+  const timestamp = clock();
+  const day = new Date(timestamp).toISOString().slice(0, 10);
+  const expiresAt = new Date(timestamp + 3 * 86400_000).toISOString();
+  const addressDigest = b64url(await hmac(sessionSecret, `game-score:${clientAddress(request)}`)).slice(0, 32);
+  const globalId = `global:${day}`;
+  const ipId = `ip:${day}:${addressDigest}`;
+  const [globalBucket, ipBucket, buckets] = await Promise.all([
+    getDocument('game_score_limits', globalId),
+    getDocument('game_score_limits', ipId),
+    queryDocuments('game_score_limits', null, 1000)
+  ]);
+  if (Number(globalBucket?.count || 0) >= GAME_SCORE_GLOBAL_DAILY_LIMIT
+    || Number(ipBucket?.count || 0) >= GAME_SCORE_IP_DAILY_LIMIT) {
+    return error('今日榜单上传次数已达上限，请明天再试', 429);
+  }
+  for (const bucket of buckets.filter(item => String(item.expires_at || '') <= now()).slice(0, 200)) {
+    await deleteDocument('game_score_limits', bucket.bucket_id);
+  }
+  await setDocument('game_score_limits', globalId, {
+    bucket_id: globalId,
+    count: Number(globalBucket?.count || 0) + 1,
+    expires_at: expiresAt
+  });
+  await setDocument('game_score_limits', ipId, {
+    bucket_id: ipId,
+    count: Number(ipBucket?.count || 0) + 1,
+    expires_at: expiresAt
+  });
+  return null;
+}
+
+async function handleGameLeaderboard(request) {
+  const globalLimited = enforceMutationRate(request, 'game-score-hot-global', 20, 60_000, 'global');
+  if (globalLimited) return globalLimited;
+  const ipLimited = enforceMutationRate(request, 'game-score-ip', 5, 10 * 60_000);
+  if (ipLimited) return ipLimited;
+  const data = await readJson(request, GAME_SCORE_BODY_MAX);
+  const prepared = validateGameScore(data);
+  if (prepared.error) return error(prepared.error);
+  const { playerId, displayName, score, luheCount } = prepared.values;
+  const clientLimited = enforceMutationRate(request, 'game-score-player', 3, 24 * 60 * 60_000, playerId);
+  if (clientLimited) return clientLimited;
+  const durableLimited = await enforceDurableGameRate(request);
+  if (durableLimited) return durableLimited;
+  const existing = withoutId(await getDocument('game_scores', playerId));
+  if (existing && Number(existing.score) >= score) {
+    return result({ scores: await readGameLeaderboard(), accepted: false, reason: 'not_personal_best', entertainmentOnly: true });
+  }
+  const day = new Date(clock()).toISOString().slice(0, 10);
+  if (existing?.submission_day === day && Number(existing.submission_count || 0) >= GAME_SCORE_PLAYER_DAILY_LIMIT) {
+    return error('同一设备今日已上传多次新高，请明天再试', 429);
+  }
+  const rows = await queryDocuments('game_scores', null, GAME_SCORE_ROWS_MAX + 1);
+  if (!existing && rows.length >= GAME_SCORE_ROWS_MAX) {
+    rows.sort((a, b) => Number(a.score) - Number(b.score)
+      || String(b.achieved_at).localeCompare(String(a.achieved_at))
+      || String(b.player_id).localeCompare(String(a.player_id)));
+    const cutoff = rows[0];
+    if (score <= Number(cutoff.score)) {
+      return result({ scores: await readGameLeaderboard(), accepted: false, reason: 'below_cutoff', entertainmentOnly: true });
+    }
+    await deleteDocument('game_scores', cutoff.player_id);
+  }
+  await setDocument('game_scores', playerId, {
+    player_id: playerId,
+    display_name: displayName,
+    score,
+    luhe_count: luheCount,
+    achieved_at: now(),
+    submission_day: day,
+    submission_count: existing?.submission_day === day ? Number(existing.submission_count || 0) + 1 : 1
+  });
+  invalidateGameLeaderboardCache();
+  return result({ scores: await readGameLeaderboard(), accepted: true, entertainmentOnly: true });
 }
 
 async function rememberNamedContributor(studentId, displayName, timestamp = now()) {
@@ -589,6 +724,17 @@ async function routeInner(request) {
     );
   }
 
+  // The leaderboard is a small, public, COS-backed read.  It is intentionally
+  // kept outside the public content snapshot so score submissions never fan
+  // out into the much larger article snapshot publish path.
+  if (method === 'GET' && path === '/api/games/great-luhe/leaderboard') {
+    return result(
+      { scores: await readGameLeaderboard(), entertainmentOnly: true },
+      200,
+      { 'cache-control': 'public, max-age=1800, stale-while-revalidate=3600' }
+    );
+  }
+
   if (method === 'GET' && path.startsWith('/api/articles/')) {
     const slug = decodeURIComponent(path.slice('/api/articles/'.length));
     const force = new URL(request.url, 'http://localhost').searchParams.has('refresh');
@@ -611,6 +757,8 @@ async function routeInner(request) {
       reviewDate: maintenanceReviewDate
     }, 503, { 'retry-after': '86400' });
   }
+
+  if (method === 'POST' && path === '/api/games/great-luhe/leaderboard') return handleGameLeaderboard(request);
 
   const isDraftWrite = (method === 'POST' && path === '/api/drafts')
     || (method === 'PUT' && /^\/api\/drafts\/[a-zA-Z0-9_-]+$/.test(path))
@@ -1103,16 +1251,19 @@ async function route(request) {
   if (!idempotencyKey || idempotencyKey.length > 200) {
     return result({ error: '请升级客户端后重试', upgradeRequired: true }, 409);
   }
-  const body = await readJson(request);
+  const body = await readJson(request, path === '/api/games/great-luhe/leaderboard' ? GAME_SCORE_BODY_MAX : 256 * 1024);
   const session = await readSession(request);
   const actor = session?.student_id || 'anonymous';
   if (typeof store.runIdempotent === 'function') {
     return store.runInTransaction(async () => {
-      await reconcilePendingPublicSnapshot();
+      if (path !== '/api/games/great-luhe/leaderboard') await reconcilePendingPublicSnapshot();
       return store.runIdempotent({ actor, method, path, key: idempotencyKey, body }, () => routeInner(request));
     });
   }
-  return store.runInTransaction(async () => { await reconcilePendingPublicSnapshot(); return routeInner(request); });
+  return store.runInTransaction(async () => {
+    if (path !== '/api/games/great-luhe/leaderboard') await reconcilePendingPublicSnapshot();
+    return routeInner(request);
+  });
 }
 
 async function validateSubmission(data) {
@@ -1151,8 +1302,8 @@ async function handler(request, response) {
     send(response, await route(request));
   } catch (err) {
     logger.error(err);
-    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : [409, 429].includes(err?.status) ? err.status : 500;
-    const message = status === 503 ? '存储服务当前繁忙，请稍后重试' : status === 409 ? '内容已在别处更新，请重试' : '服务器暂时无法处理请求';
+    const status = err?.code === 'PG_REQUEST_BUDGET_EXCEEDED' || err?.status === 503 ? 503 : [409, 413, 429].includes(err?.status) ? err.status : 500;
+    const message = status === 503 ? '存储服务当前繁忙，请稍后重试' : status === 409 ? '内容已在别处更新，请重试' : status === 413 ? '请求内容过大' : '服务器暂时无法处理请求';
     send(response, result({ error: message, ...(status === 409 ? { conflict: true } : {}), diagnostic: safeDiagnostic(err) }, status));
   }
 }

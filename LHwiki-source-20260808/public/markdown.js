@@ -1,4 +1,4 @@
-import { normalizeBlocks } from './editor.js?v=20260829-native-formats';
+import { normalizeBlocks } from './editor.js?v=20260912-editor-actions';
 
 const CODE_FENCE = /^(`{3,})([^\n`]*)\n([\s\S]*)\n\1$/;
 const INLINE_PATTERN = /(?<!\\)(\*\*[^*\n]+\*\*|~~[^~\n]+~~|`[^`\n]+`|\$(?!\s)[^$\n]*?\S\$|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\*[^*\n]+\*)/g;

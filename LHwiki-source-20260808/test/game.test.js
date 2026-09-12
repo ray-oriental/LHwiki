@@ -80,3 +80,21 @@ test('game entry is not a backend route and iframe does not request privileged c
   assert.doesNotMatch(gameHtml, /allow-top-navigation|allow-popups|allow-forms/);
   assert.doesNotMatch(app, /games\/great-luhe[^"']*\/api/);
 });
+
+test('leaderboard stays host-owned, opt-in, and event-driven', () => {
+  assert.match(app, /game-leaderboard/);
+  assert.match(app, /MutationObserver/);
+  assert.match(app, /src="\/games\/great-luhe\/\?theme=system"/);
+  assert.match(app, /root\?\.children/);
+  assert.match(app, /getBoundingClientRect\(\)\.height/);
+  assert.match(app, /data-lhwiki-embed-fix/);
+  assert.match(app, /html,body\{margin:0;overflow:hidden\}/);
+  assert.match(app, /score > runStartBest && luheCount >= 1/);
+  assert.match(app, /method: 'POST'/);
+  assert.match(app, /GAME_LEADERBOARD_TTL = 30 \* 60_000/);
+  assert.doesNotMatch(app, /setInterval\([^)]*leaderboard/i);
+  assert.match(readFileSync(join(publicDir, 'index.html'), 'utf8'), /game-submit-dialog/);
+  assert.match(styles, /great-luhe-frame[^}]*overflow: hidden/);
+  assert.match(styles, /great-luhe-frame \{ order: -1; \}/);
+  for (const source of sourceFiles) assert.doesNotMatch(source, /leaderboard|MutationObserver|\/api\//i);
+});

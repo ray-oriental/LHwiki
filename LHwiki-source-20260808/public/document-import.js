@@ -1,5 +1,5 @@
-import { normalizeBlocks } from './editor.js?v=20260829-native-formats';
-import { parseMarkdown } from './markdown.js?v=20260829-native-formats';
+import { normalizeBlocks } from './editor.js?v=20260912-editor-actions';
+import { parseMarkdown } from './markdown.js?v=20260912-editor-actions';
 import { parseDocx } from './docx-import.js?v=20260829-native-formats';
 
 export function parseLatexDocument(source = '') {
