@@ -33,8 +33,6 @@ export const COMMANDS = Object.freeze([
   { id: 'toggle3', type: 'toggle', level: 3, category: '结构', label: '折叠中标题', description: '标题和可折叠子内容', aliases: ['折叠', '中标题', 'toggle h3'] },
   { id: 'divider', type: 'divider', category: '结构', label: '分隔线', description: '分隔上下内容', aliases: ['分隔线', 'divider', 'line', 'hr'] },
   { id: 'formula', type: 'formula', category: '数学', label: '数学公式', description: 'LaTeX 输入，实时显示', aliases: ['公式', '数学', 'latex', 'math', 'equation'] },
-  { id: 'import-document', action: 'import-document', category: '导入与导出', label: '导入文档', description: 'Markdown、DOCX、TXT 或 LaTeX', aliases: ['导入', 'markdown', 'md', 'docx', 'word', 'latex', 'tex'] },
-  { id: 'export-markdown', action: 'export-markdown', category: '导入与导出', label: '导出 Markdown', description: '生成可复制的 Markdown', aliases: ['导出', 'export', 'markdown', 'md'] },
   { id: 'duplicate', action: 'duplicate', category: '块操作', label: '复制当前块', description: '在下方创建副本', aliases: ['复制', 'duplicate', 'copy'] },
   { id: 'move-up', action: 'move-up', category: '块操作', label: '上移当前块', description: '向上移动一格', aliases: ['上移', 'move up'] },
   { id: 'move-down', action: 'move-down', category: '块操作', label: '下移当前块', description: '向下移动一格', aliases: ['下移', 'move down'] },
@@ -321,7 +319,6 @@ export class BlockEditor {
     const old = location.block; if (old.text === '/' || old.text?.startsWith('/')) old.text = '';
     if (command.action) {
       if (command.action.startsWith('inline-')) { this.hideCommandPalette(); this.applyInline(command.action.slice(7)); return; }
-      if (['import-document', 'export-markdown'].includes(command.action)) { this.hideCommandPalette(); this.root.dispatchEvent(new CustomEvent('editorutility', { bubbles: true, detail: { action: command.action } })); return; }
       this.remember();
       if (command.action === 'duplicate') { const copy = cloneBlockTree(old); if (contentNodeCount([...this.blocks, copy]) > 400) { this.limitReached(); this.hideCommandPalette(); return; } location.collection.splice(location.index + 1, 0, copy); old && this.root.querySelector(`.editor-block[data-block-id="${old.id}"]`)?.after(this.renderBlock(copy)); this.activeId = copy.id; }
       if (command.action === 'delete') { if (location.collection.length === 1) location.collection.splice(0, 1, paragraph()); else location.collection.splice(location.index, 1); this.render(); this.activeId = location.collection[Math.min(location.index, location.collection.length - 1)].id; }

@@ -1,10 +1,10 @@
 import { formatDate } from './date.js';
-import { BlockEditor, EDITOR_SCHEMA_VERSION, contentNodeCount, normalizeBlocks } from './editor.js?v=20260829-native-formats';
+import { BlockEditor, EDITOR_SCHEMA_VERSION, contentNodeCount, normalizeBlocks } from './editor.js?v=20260912-editor-actions';
 import { renderMath } from './math-renderer.js?v=20260813-editor-studio';
 import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listLocalDrafts } from './draft-manager.js?v=20260909-v0810c';
-import { changelogPage } from './changelog.js?v=20260829-native-formats';
-import { blocksToMarkdown, codeFence, parseInlineMarkdown } from './markdown.js?v=20260829-native-formats';
-import { importDocument } from './document-import.js?v=20260829-native-formats';
+import { changelogPage } from './changelog.js?v=20260912-great-luhe-leaderboard';
+import { blocksToMarkdown, codeFence, parseInlineMarkdown } from './markdown.js?v=20260912-editor-actions';
+import { importDocument } from './document-import.js?v=20260912-editor-actions';
 
 const MAINTENANCE_MODE = false;
 const MAINTENANCE_REVIEW_DATE = '2026年9月7日';
@@ -18,8 +18,12 @@ const SESSION_CACHE_KEY = `lhwiki:session:${CACHE_VERSION}`;
 const MAINTENANCE_LOCAL_USER_KEY = 'lhwiki:maintenance-local-user';
 const BOOTSTRAP_TTL = 6 * 60 * 60_000;
 const SESSION_TTL = 7 * 24 * 60 * 60_000;
+const GAME_LEADERBOARD_CACHE_KEY = 'lhwiki:great-luhe:leaderboard:v1';
+const GAME_LEADERBOARD_TTL = 30 * 60_000;
+const GAME_PLAYER_ID_KEY = 'lhwiki:great-luhe:player-id:v1';
 let baseTeachers = null;
 let cleanupGameThemeSync = null;
+let cleanupGameIntegration = null;
 const IDEMPOTENCY_PREFIX = 'lhwiki:idempotency:v1:';
 
 function idempotencySlot(method, path, body) {
@@ -224,6 +228,8 @@ function themeControl() {
 function shell(content) {
   cleanupGameThemeSync?.();
   cleanupGameThemeSync = null;
+  cleanupGameIntegration?.();
+  cleanupGameIntegration = null;
   const current = route();
   const roleTools = state.user && ['reviewer', 'admin'].includes(state.user.role)
     ? navLink('#/review', '✓', '审核投稿', ['review', 'admin-review-edit'].includes(current.page)) : '';
@@ -262,14 +268,20 @@ function shell(content) {
 }
 
 function greatLuhePage() {
-  return `<header class="page-heading great-luhe-heading"><span class="eyebrow">CAMPUS LITTLE THING</span><h1>合成潞河</h1><p>把熟悉的校徽合成到潞河。它是一个纯前端小游戏，不会上传内容；进度只保存在当前浏览器。</p></header>
+  return `<header class="page-heading great-luhe-heading"><span class="eyebrow">CAMPUS LITTLE THING</span><h1>合成潞河</h1><p>把熟悉的校徽合成到潞河。游戏过程留在本机，成绩只有经你确认才会上传娱乐榜。</p></header>
     <section class="great-luhe-card" aria-labelledby="great-luhe-title">
       <div class="great-luhe-copy">
         <div class="great-luhe-card-heading"><div><span class="eyebrow">LOCAL · NO BACKEND</span><h2 id="great-luhe-title">潞河校徽合成小游戏</h2></div><span class="great-luhe-badge">本机运行</span></div>
         <p>拖动或点击场地投放校徽；同等级校徽相遇后会继续合成。</p>
-        <p class="great-luhe-note">游戏过程完全在你的设备上运行，不会调用 LHwiki 接口。最高分和声音偏好只保存在当前浏览器。</p>
+        <p class="great-luhe-note">游戏过程完全在你的设备上运行，最高分和声音偏好只保存在当前浏览器；仅在符合登榜条件且你确认后，外层页面才会上传这一次成绩。</p>
+        <section class="game-leaderboard" aria-labelledby="game-leaderboard-title">
+          <div class="game-leaderboard-heading"><div><span class="eyebrow">COMMUNITY SCOREBOARD</span><h3 id="game-leaderboard-title">潞河娱乐榜</h3></div><span class="game-leaderboard-status" data-game-leaderboard-status role="status" aria-live="polite">读取中…</span></div>
+          <p class="game-leaderboard-rule"><strong>登榜条件</strong><span>刷新本机个人最高分，且本局至少合成 1 个潞河；达成后由玩家自行确认是否上传。</span></p>
+          <ol class="game-leaderboard-list" data-game-leaderboard aria-live="polite"><li class="game-leaderboard-empty">榜单加载中…</li></ol>
+          <p class="game-leaderboard-note">只展示玩家主动上传的成绩，用于娱乐，不代表防作弊排名。</p>
+        </section>
       </div>
-      <iframe class="great-luhe-frame" src="/games/great-luhe/index.html?theme=system" title="合成潞河小游戏" loading="lazy" sandbox="allow-scripts allow-same-origin" allow="autoplay" referrerpolicy="no-referrer"></iframe>
+      <iframe class="great-luhe-frame" src="/games/great-luhe/?theme=system" title="合成潞河小游戏" loading="lazy" sandbox="allow-scripts allow-same-origin" allow="autoplay" referrerpolicy="no-referrer"></iframe>
     </section>`;
 }
 
@@ -281,6 +293,187 @@ function userControl() {
       <button data-access>输入权限口令</button>
       <button data-logout>退出登入</button>
     </div></div>`;
+}
+
+function gamePlayerId() {
+  try {
+    let value = localStorage.getItem(GAME_PLAYER_ID_KEY);
+    if (!value || !/^[A-Za-z0-9_-]{16,80}$/.test(value)) {
+      value = crypto.randomUUID();
+      localStorage.setItem(GAME_PLAYER_ID_KEY, value);
+    }
+    return value;
+  } catch { return `local-${crypto.randomUUID()}`; }
+}
+
+function renderGameLeaderboard(scores, status = '') {
+  const list = document.querySelector('[data-game-leaderboard]');
+  const stateLabel = document.querySelector('[data-game-leaderboard-status]');
+  if (!list) return;
+  if (stateLabel) stateLabel.textContent = status;
+  list.innerHTML = scores.length
+    ? scores.map((item, index) => `<li><span class="game-leaderboard-rank">${index + 1}</span><span class="game-leaderboard-name">${esc(item.name || '匿名同学')}</span><strong>${Number(item.score).toLocaleString('zh-CN')}</strong><small>潞河 × ${Number(item.luheCount) || 1}</small></li>`).join('')
+    : '<li class="game-leaderboard-empty">还没有成绩，成为第一个登榜的人。</li>';
+}
+
+async function loadGameLeaderboard() {
+  const cached = readCache(localStorage, GAME_LEADERBOARD_CACHE_KEY, GAME_LEADERBOARD_TTL);
+  if (cached?.scores) {
+    renderGameLeaderboard(cached.scores, '本机缓存');
+    return cached.scores;
+  }
+  try {
+    const response = await api('/api/games/great-luhe/leaderboard');
+    const scores = Array.isArray(response.scores) ? response.scores : [];
+    writeCache(localStorage, GAME_LEADERBOARD_CACHE_KEY, { scores });
+    renderGameLeaderboard(scores, '刚刚更新');
+    return scores;
+  } catch {
+    renderGameLeaderboard([], '暂时无法读取');
+    return [];
+  }
+}
+
+async function promptGameScoreUpload({ score, luheCount }) {
+  const dialog = document.querySelector('#game-submit-dialog');
+  const form = dialog?.querySelector('form');
+  if (!(dialog instanceof HTMLDialogElement) || !form) return;
+  const scoreLabel = form.querySelector('[data-game-score]');
+  const luheLabel = form.querySelector('[data-game-luhe]');
+  const errorLabel = form.querySelector('[data-game-submit-error]');
+  const nameInput = form.elements.namedItem('displayName');
+  if (!(nameInput instanceof HTMLInputElement)) return;
+  if (scoreLabel) scoreLabel.textContent = Number(score).toLocaleString('zh-CN');
+  if (luheLabel) luheLabel.textContent = `潞河 × ${luheCount}`;
+  if (errorLabel) errorLabel.textContent = '';
+  nameInput.value = '';
+  dialog.showModal();
+  nameInput.focus();
+  const onSubmit = async event => {
+    event.preventDefault();
+    const displayName = nameInput.value.trim();
+    if (!displayName) { if (errorLabel) errorLabel.textContent = '请填写想显示的名字'; nameInput.focus(); return; }
+    const submitButton = form.querySelector('[data-game-submit]');
+    if (submitButton instanceof HTMLButtonElement) submitButton.disabled = true;
+    try {
+      const response = await api('/api/games/great-luhe/leaderboard', {
+        method: 'POST',
+        body: { playerId: gamePlayerId(), displayName, score: Number(score), luheCount: Number(luheCount) }
+      });
+      const scores = Array.isArray(response.scores) ? response.scores : [];
+      writeCache(localStorage, GAME_LEADERBOARD_CACHE_KEY, { scores });
+      renderGameLeaderboard(scores, '刚刚更新');
+      dialog.close();
+      toast(response.accepted === false
+        ? response.reason === 'below_cutoff' ? '本次成绩未进入前 10，未写入榜单' : '云端已有更高成绩，本次未覆盖'
+        : '成绩已加入潞河娱乐榜');
+    } catch (error) {
+      if (errorLabel) errorLabel.textContent = error.message || '暂时无法上传，请稍后再试';
+    } finally {
+      if (submitButton instanceof HTMLButtonElement) submitButton.disabled = false;
+    }
+  };
+  const cancelButton = form.querySelector('[data-game-cancel]');
+  const onCancel = () => dialog.close();
+  cancelButton?.addEventListener('click', onCancel, { once: true });
+  form.addEventListener('submit', onSubmit);
+  dialog.addEventListener('close', () => {
+    form.removeEventListener('submit', onSubmit);
+    cancelButton?.removeEventListener('click', onCancel);
+  }, { once: true });
+}
+
+function bindGameIntegration(frame) {
+  let gameDocument = null;
+  let observer = null;
+  let sizeObserver = null;
+  let runStartBest = 0;
+  let lastScore = 0;
+  let lastModal = null;
+  let prompted = false;
+  let queued = false;
+  const numberFrom = (element, fallback = 0) => {
+    const value = Number(String(element?.textContent || '').replace(/[^0-9-]/g, ''));
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const readBest = () => numberFrom(gameDocument?.querySelector('[data-role="best"]'));
+  const resize = () => {
+    if (!gameDocument) return;
+    const root = gameDocument.querySelector('.gluhe-root');
+    // The game root is min-height:100vh, so reading its scrollHeight after changing
+    // the iframe creates a resize feedback loop. Its three flow children describe
+    // the intrinsic HUD + canvas + footer height without changing the game itself.
+    const height = Math.ceil(Array.from(root?.children || []).reduce((sum, child) => {
+      const position = gameDocument.defaultView?.getComputedStyle(child).position;
+      return ['absolute', 'fixed'].includes(position) ? sum : sum + child.getBoundingClientRect().height;
+    }, 0));
+    if (height > 0) { frame.style.height = `${height}px`; frame.style.aspectRatio = 'auto'; }
+  };
+  const inspect = () => {
+    queued = false;
+    const currentScore = numberFrom(gameDocument?.querySelector('[data-role="score"]'));
+    if (currentScore === 0 && lastScore > 0) {
+      runStartBest = readBest();
+      prompted = false;
+      lastModal = null;
+    }
+    lastScore = currentScore;
+    const modal = gameDocument?.querySelector('.gluhe-modal');
+    if (!modal || modal === lastModal) return;
+    lastModal = modal;
+    const score = numberFrom(modal.querySelector('.gluhe-final-score'));
+    const luheCount = numberFrom(gameDocument.querySelector('[data-role="luhe"]'));
+    if (!prompted && score > runStartBest && luheCount >= 1) {
+      prompted = true;
+      promptGameScoreUpload({ score, luheCount });
+    }
+  };
+  const scheduleInspect = () => {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(inspect);
+  };
+  const startRun = () => {
+    runStartBest = readBest();
+    lastScore = numberFrom(gameDocument?.querySelector('[data-role="score"]'));
+    prompted = false;
+    lastModal = null;
+    scheduleInspect();
+  };
+  const onLoad = () => {
+    observer?.disconnect();
+    sizeObserver?.disconnect();
+    gameDocument = frame.contentDocument;
+    if (!gameDocument) return;
+    if (!gameDocument.querySelector('style[data-lhwiki-embed-fix]')) {
+      const embedStyle = gameDocument.createElement('style');
+      embedStyle.dataset.lhwikiEmbedFix = 'true';
+      embedStyle.textContent = 'html,body{margin:0;overflow:hidden}';
+      gameDocument.head.append(embedStyle);
+    }
+    observer = new MutationObserver(scheduleInspect);
+    observer.observe(gameDocument.documentElement, { subtree: true, childList: true, characterData: true });
+    const root = gameDocument.querySelector('.gluhe-root');
+    if (root && 'ResizeObserver' in window) {
+      sizeObserver = new ResizeObserver(resize);
+      sizeObserver.observe(root);
+    }
+    startRun();
+    resize();
+  };
+  const onResize = () => resize();
+  frame.addEventListener('load', onLoad);
+  window.addEventListener('resize', onResize);
+  cleanupGameIntegration = () => {
+    frame.removeEventListener('load', onLoad);
+    window.removeEventListener('resize', onResize);
+    observer?.disconnect();
+    sizeObserver?.disconnect();
+    observer = null;
+    sizeObserver = null;
+    gameDocument = null;
+  };
+  if (frame.contentDocument?.readyState === 'complete') onLoad();
 }
 
 function maintenanceBanner() {
@@ -328,6 +521,8 @@ function bindShell() {
   });
   const frame = document.querySelector('.great-luhe-frame');
   if (frame instanceof HTMLIFrameElement) {
+    cleanupGameIntegration?.();
+    cleanupGameIntegration = null;
     const sendTheme = () => frame.contentWindow?.postMessage({
       type: 'lhwiki-theme-change',
       theme: window.LHTheme?.effective?.() || 'light'
@@ -339,6 +534,8 @@ function bindShell() {
       frame.removeEventListener('load', sendTheme);
       window.removeEventListener('lhwiki-theme-change', sendTheme);
     };
+    bindGameIntegration(frame);
+    loadGameLeaderboard();
   }
 }
 
@@ -650,7 +847,7 @@ async function contributePage() {
           <label class="title-field"><span>标题</span><input name="title" maxlength="100" placeholder="给这段经历一个具体的标题" required></label>
           <label><span>一句话摘要</span><textarea name="summary" maxlength="240" placeholder="告诉读者背景、重点和适合谁阅读" required></textarea></label>
           <label><span>评价对象或访谈主题（选填）</span><input name="subject" maxlength="80" placeholder="例如：文学社 / 高三一轮复习"></label></div>
-          <div class="editor-chrome"><div class="editor-actions"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块或导入文档" aria-haspopup="dialog" aria-controls="editor-command-palette" aria-expanded="false">＋ <span>插入</span></button></div><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · ⌘/Ctrl+Z 撤销</span></div>
+          <div class="editor-chrome"><div class="editor-actions"><button type="button" class="editor-insert" data-editor-insert aria-label="插入内容块" aria-haspopup="dialog" aria-controls="editor-command-palette" aria-expanded="false">＋ <span>插入</span></button><button type="button" class="editor-insert" data-document-import-open>导入文档</button><button type="button" class="editor-insert" data-document-export-open>导出 Markdown</button></div><span class="editor-hint">输入 / 搜索命令 · Enter 新段落 · ⌘/Ctrl+Z 撤销</span></div>
           <div id="block-editor" class="block-editor" aria-label="文章正文"></div>
           <div class="byline-panel"><div><label>署名<input name="authorLabel" maxlength="40" placeholder="例如：陈同学 / Chenrx"></label><label class="checkbox"><input type="checkbox" name="anonymous"> 公开时显示为“匿名同学”</label></div><aside class="credit-note"><strong>让名字和经验一起留下</strong><p>实名投稿通过审核后，署名会进入「致谢」。每个学号只记录第一次实名署名；匿名投稿不会受到区别审核。</p><a href="#/thanks">查看致谢板块 →</a></aside></div>
           <div class="notice warn">提交前请删除他人的联系方式、成绩、家庭情况等隐私。评价他人时，请描述事实与个人感受。</div>
@@ -752,7 +949,8 @@ function bindEditorExperience(context, initial) {
   const replaceButton = document.querySelector('[data-document-replace]'), appendButton = document.querySelector('[data-document-append]'); let preparedImport = null;
   const resetImport = () => { preparedImport = null; replaceButton.disabled = true; appendButton.disabled = true; importReport.textContent = '内容已变更，请重新预检。'; };
   const openDocumentDialog = ({ exporting = false } = {}) => { documentFormat.value = 'markdown'; documentFile.value = ''; documentSource.value = exporting ? blocksToMarkdown(editor.getBlocks()) : ''; preparedImport = null; replaceButton.disabled = true; appendButton.disabled = true; importReport.textContent = exporting ? '已生成当前正文的 Markdown。' : '尚未预检'; documentDialog.showModal(); };
-  document.querySelector('#block-editor').addEventListener('editorutility', event => openDocumentDialog({ exporting: event.detail.action === 'export-markdown' }));
+  document.querySelector('[data-document-import-open]').addEventListener('click', () => openDocumentDialog());
+  document.querySelector('[data-document-export-open]').addEventListener('click', () => openDocumentDialog({ exporting: true }));
   document.querySelector('[data-document-close]').addEventListener('click', () => documentDialog.close());
   documentSource.addEventListener('input', resetImport); documentFormat.addEventListener('change', () => { resetImport(); documentFile.value = ''; document.querySelector('[data-document-source-wrap]').hidden = documentFormat.value === 'docx'; });
   documentFile.addEventListener('change', async () => { const file = documentFile.files?.[0]; if (!file) return; if (file.size > 12 * 1024 * 1024) { documentFile.value = ''; importReport.textContent = '文件不能超过 12 MB。'; return; } const extension = file.name.split('.').pop()?.toLowerCase(); documentFormat.value = extension === 'docx' ? 'docx' : ['tex', 'latex'].includes(extension) ? 'latex' : extension === 'txt' ? 'text' : 'markdown'; document.querySelector('[data-document-source-wrap]').hidden = documentFormat.value === 'docx'; if (documentFormat.value !== 'docx') documentSource.value = await file.text(); resetImport(); });

@@ -165,6 +165,8 @@ test('command palette finds Chinese and English aliases without crowding the too
   assert.equal(filterCommands('latex')[0].id, 'formula');
   assert.equal(filterCommands('h4')[0].id, 'minorheading');
   assert.equal(filterCommands('toggle heading')[0].type, 'toggle');
+  assert.equal(filterCommands('导入文档').length, 0);
+  assert.equal(filterCommands('导出 Markdown').length, 0);
 });
 
 test('advanced editor blocks normalize to stable bounded structures', () => {
@@ -318,13 +320,16 @@ test('editor studio keeps one restrained entry point and a narrow-screen overflo
   assert.match(app, /published-toggle/);
   assert.match(css, /\.editor-table-scroll, \.published-table-scroll[^}]+overflow-x: auto/s);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]+\.editor-columns, \.published-columns \{ grid-template-columns: 1fr; \}/);
-  assert.match(html, /20260829-native-formats/);
+  assert.match(html, /20260912-great-luhe-rules/);
+  assert.match(html, /app\.js\?v=20260912-great-luhe-rules/);
   assert.match(app, /draft-manager\.js\?v=20260909-v0810c/);
   assert.match(app, /data-document-format/);
   assert.match(app, /data-document-analyze/);
-  assert.match(app, /editorutility/);
+  assert.match(app, /data-document-import-open/);
+  assert.match(app, /data-document-export-open/);
+  assert.doesNotMatch(app, /editorutility/);
   assert.match(html, /theme\.js\?v=20260822-v085/);
-  assert.match(app, /changelog\.js\?v=20260829-native-formats/);
+  assert.match(app, /changelog\.js\?v=20260912-great-luhe-leaderboard/);
   assert.match(css, /:root\[data-theme-effective="dark"\]/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.sidebar-changelog \{ background: linear-gradient/);
   assert.match(css, /:root\[data-theme-effective="dark"\] \.teacher-card footer/);
