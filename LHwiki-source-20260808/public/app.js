@@ -5,6 +5,7 @@ import { DraftManager, clearLocalDraft, clearUserLocalDrafts, draftKeyFor, listL
 import { changelogPage } from './changelog.js?v=20260912-great-luhe-leaderboard';
 import { blocksToMarkdown, codeFence, parseInlineMarkdown } from './markdown.js?v=20260912-editor-actions';
 import { importDocument } from './document-import.js?v=20260912-editor-actions';
+import { hasUnlistedApprovedSubmission } from './published-submission-reconciliation.js?v=20260913-published-directory-reconcile';
 
 const MAINTENANCE_MODE = false;
 const MAINTENANCE_REVIEW_DATE = '2026年9月7日';
@@ -781,6 +782,7 @@ async function loadPrivateWorkspace({ force = false } = {}) {
   state.privateWorkspace = { userId, value };
   state.drafts = value.drafts || [];
   state.submissions = value.submissions || [];
+  if (hasUnlistedApprovedSubmission(state.articles, state.submissions)) await refreshBootstrap();
   return value;
 }
 
